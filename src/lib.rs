@@ -15,6 +15,9 @@ pub struct RefluxComputeNode<T, D> {
 }
 
 impl<T: 'static + Send, D: 'static + Send> RefluxComputeNode<T, D> {
+    /**
+     * Create a new Compute Node instance.
+     */
     pub fn new() -> Self {        
         let (tx, rx) = mpsc::channel();
         RefluxComputeNode{
@@ -26,6 +29,9 @@ impl<T: 'static + Send, D: 'static + Send> RefluxComputeNode<T, D> {
         }
     }
 
+    /**
+     * Set a computation function that accepts an input, processes it and produces an output.
+     */
     pub fn set_computer<F, S>(&mut self, n_sinks: usize, sink_fn: F, extern_state: S) -> ()
     where F: Fn(T, Sender<T>, io::Result<Sender<D>>, S) -> io::Result<()> + 'static + Copy + Send,
           S: 'static + Clone + Send
@@ -57,14 +63,23 @@ impl<T: 'static + Send, D: 'static + Send> RefluxComputeNode<T, D> {
         
     }
 
+    /**
+     * Set a data source for the computer.
+     */
     pub fn collector(&self) -> Sender<T> {
         self.sender.clone()
     }
 
+    /**
+     * Set a destination for the computed result.
+     */
     pub fn set_drain(&mut self, drainer: Sender<D>) {
         self.drainer = Some(drainer);
     }
 
+    /**
+     * Run the computer, providing a function to indicate when to terminate the computer.
+     */
     pub fn run<F>(&mut self, timeout: F) -> Result<(), RecvError>
     where F: Fn(Sender<(u64, bool)>) -> ()
     {
