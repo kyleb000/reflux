@@ -7,16 +7,15 @@ use std::thread::JoinHandle;
 
 use crossbeam_channel::{Sender, Receiver, RecvError};
 
-pub struct RefluxComputeNode<I, O, S> {
+pub struct RefluxComputeNode<I, O> {
     computers: Vec<(JoinHandle<()>, Sender<I>)>,
     receiver: Receiver<I>,
     collector: Sender<I>,
     run: Arc<Mutex<Cell<bool>>>,
     drainer: Option<Sender<O>>,
-    state_managers: Vec<(JoinHandle<()>, Sender<S>)>
 }
 
-impl<I: 'static + Send, O: 'static + Send, S: 'static + Send> RefluxComputeNode<I, O, S> {
+impl<I: 'static + Send, O: 'static + Send> RefluxComputeNode<I, O> {
     /**
      * Create a new Compute Node instance.
      */
@@ -28,22 +27,20 @@ impl<I: 'static + Send, O: 'static + Send, S: 'static + Send> RefluxComputeNode<
             collector: tx,
             run: Arc::new(Mutex::new(Cell::new(true))),
             drainer: None,
-            state_managers: Vec::new(),
         }
     }
 
     /**
      * Set a computation function that accepts an input, processes it and produces an output.
      */
-    pub fn set_computers<F>(&mut self, num_computers: usize, computer: F) -> ()
-    where
-        F: Fn(I, Sender<I>, io::Result<Sender<O>>, Sender<S>) -> io::Result<()> + 'static + Copy + Send,
-        S: 'static + Clone + Send
+    pub fn set_computers<F, S>(&mut self, n_sinks: usize, sink_fn: F, extern_state: S) -> ()
+    where F: Fn(I, Sender<I>, io::Result<Sender<O>>, S) -> io::Result<()> + 'static + Copy + Send,
+          S: 'static + Clone + Send
     {
-        for _ in 0..num_computers {
+        for _ in 0..n_sinks {
             let (tx, rx) = crossbeam_channel::unbounded();
-            let (r2, _) = crossbeam_channel::unbounded();
             let own_sender = self.collector.clone();
+            let state = extern_state.clone();
             let drainer = self.drainer.clone();
             let run_lock = self.run.clone();
             self.computers.push((thread::spawn(move || {
@@ -56,7 +53,7 @@ impl<I: 'static + Send, O: 'static + Send, S: 'static + Send> RefluxComputeNode<
                         let drainer_res = drainer.clone()
                             .ok_or(Error::new(ErrorKind::BrokenPipe, "No drain set"));
 
-                        if let Err(e) = computer(val.unwrap(), own_sender.clone(), drainer_res, r2.clone()) {
+                        if let Err(e) = sink_fn(val.unwrap(), own_sender.clone(), drainer_res, state.clone()) {
                             println!("{}", e);
                             break;
                         };
@@ -64,7 +61,6 @@ impl<I: 'static + Send, O: 'static + Send, S: 'static + Send> RefluxComputeNode<
                 }
             }), tx))
         }
-        
     }
 
     /**
