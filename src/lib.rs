@@ -1,101 +1,179 @@
-use std::cell::Cell;
-use std::io::{Error, ErrorKind};
-use std::sync::{Mutex, Arc};
-use std::{thread, io};
-use std::time::Duration;
+#![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+#![feature(unboxed_closures)]
+
+use std::marker::PhantomData;
+use std::ops::{Coroutine, CoroutineState};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
+use crossbeam_channel::{Receiver, unbounded};
 
-use crossbeam_channel::{Sender, Receiver, RecvError};
 
-pub struct RefluxComputeNode<I, O> {
-    computers: Vec<(JoinHandle<()>, Sender<I>)>,
-    receiver: Receiver<I>,
-    collector: Sender<I>,
-    run: Arc<Mutex<Cell<bool>>>,
-    drainer: Option<Sender<O>>,
+struct Inlet {
+    inlet_fn: JoinHandle<()>,
 }
 
-impl<I: 'static + Send, O: 'static + Send> RefluxComputeNode<I, O> {
-    /**
-     * Create a new Compute Node instance.
-     */
-    pub fn new() -> Self {        
-        let (tx, rx) = crossbeam_channel::unbounded();
-        RefluxComputeNode{
-            computers: Vec::new(),
-            receiver: rx,
-            collector: tx,
-            run: Arc::new(Mutex::new(Cell::new(true))),
-            drainer: None,
-        }
-    }
-
-    /**
-     * Set a computation function that accepts an input, processes it and produces an output.
-     */
-    pub fn set_computers<F, S>(&mut self, n_sinks: usize, sink_fn: F, extern_state: S) -> ()
-    where F: Fn(I, Sender<I>, io::Result<Sender<O>>, S) -> io::Result<()> + 'static + Copy + Send,
-          S: 'static + Clone + Send
-    {
-        for _ in 0..n_sinks {
-            let (tx, rx) = crossbeam_channel::unbounded();
-            let own_sender = self.collector.clone();
-            let state = extern_state.clone();
-            let drainer = self.drainer.clone();
-            let run_lock = self.run.clone();
-            self.computers.push((thread::spawn(move || {
-                while run_lock.lock().unwrap().get() {
-                    loop {
-                        let val = rx.recv();
-                        if val.is_err() {
-                            break;
+impl Inlet {
+    pub fn new<F, C, T>(inlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Receiver<T>)
+        where 
+            F: Fn() -> C + Send + 'static,
+            C: Coroutine<()> + Send + 'static + Unpin,
+            T: Send + 'static + From<<C as Coroutine<()>>::Yield> {
+        let (tx, rx) = unbounded();
+        let inlet_thr = thread::spawn(move || {
+            while !stop_sig.load(Ordering::Relaxed) {
+                let mut routine = inlet_fn();
+                loop {
+                    match Pin::new(&mut routine).resume(()) {
+                        CoroutineState::Yielded(res) => {
+                            let r: T = res.into();
+                            tx.send(r).unwrap();
                         }
-                        let drainer_res = drainer.clone()
-                            .ok_or(Error::new(ErrorKind::BrokenPipe, "No drain set"));
-
-                        if let Err(e) = sink_fn(val.unwrap(), own_sender.clone(), drainer_res, state.clone()) {
-                            println!("{}", e);
-                            break;
-                        };
-                    }
-                }
-            }), tx))
-        }
-    }
-
-    /**
-     * Set a data source for the computer.
-     */
-    pub fn collector(&self) -> Sender<I> {
-        self.collector.clone()
-    }
-
-    /**
-     * Set a destination for the computed result.
-     */
-    pub fn set_drain(&mut self, drainer: Sender<O>) {
-        self.drainer = Some(drainer);
-    }
-
-    /**
-     * Run the computer, providing a function to indicate when to terminate the computer.
-     */
-    pub fn run<F>(&mut self, timeout: F) -> Result<(), RecvError>
-    where F: Fn(Sender<(u64, bool)>) -> ()
-    {
-        loop {
-            for i in 0..self.computers.len() {
-                let (tx, rx) = crossbeam_channel::unbounded();
-                timeout(tx);
-                let (tm, retry) = rx.recv()?;
-                let val = self.receiver.recv_timeout(Duration::from_millis(tm));
-                if val.is_ok() {
-                    let _ = self.computers.get(i).unwrap().1.send(val.unwrap());
-                } else if !retry{
-                    self.run.lock().unwrap().set(false);
-                    return Ok(());
+                        _ => break
+                    } 
                 }
             }
+        });        
+        let s = Self {
+            inlet_fn: inlet_thr,
+        };
+
+        (s, rx)
+    }
+    pub fn join(self) -> thread::Result<()> {
+        self.inlet_fn.join()?;
+        Ok(())
+    }
+}
+
+
+struct Outlet {
+    outlet_fn: JoinHandle<()>
+}
+
+impl Outlet {
+    pub fn new<T, F>(outlet_fn: F, receiver: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self
+        where
+            T: Send + 'static,
+            F: Fn(T) + Send + 'static {
+        let outlet = thread::spawn(move || {
+            loop {
+                while !stop_sig.load(Ordering::Relaxed) {
+                    if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
+                        outlet_fn(data)
+                    }
+                }
+            }
+        });
+        Self {
+            outlet_fn: outlet
         }
     }
+    
+    pub fn join(self) -> thread::Result<()> {
+        self.outlet_fn.join()?;
+        Ok(())
+    }
+}
+
+
+
+
+/// A simple macro to create a function that returns a coroutine.
+macro_rules! add_routine {
+    ($a: expr) => {
+        move || {
+            return $a
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::Duration;
+    use super::*;
+    
+    #[test]
+    fn inlet_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (inlet, inlet_chan): (Inlet, Receiver<String>) = Inlet::new(
+            add_routine!(#[coroutine] |_: ()| {
+                yield "Hello, world".to_string()
+            }), stop_flag.clone());
+        
+        
+        let data = inlet_chan.recv().unwrap();
+        stop_flag.store(true, Ordering::Relaxed);
+        inlet.join().unwrap();
+        
+        assert_eq!(data, "Hello, world".to_string())
+    }
+    
+    #[test]
+    fn outlet_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (test_tx, test_rx) = unbounded();
+        let (data_tx, data_rx) = unbounded();
+        let outlet= Outlet::new(move |test: String| {
+            test_tx.send(test).unwrap();
+        }, data_rx, stop_flag.clone());
+        
+        data_tx.send("Hello, world".to_string()).unwrap();
+        
+        let data_recv = test_rx.recv().unwrap();
+        stop_flag.store(true, Ordering::Relaxed);
+        outlet.join().unwrap();
+        
+        assert_eq!(data_recv, "Hello, world".to_string())
+    }
+
+    // #[test]
+    // fn it_works() {
+    //     let node = ComputeNode::<String, String, usize>::new(
+    //         add_routine!(
+    //             #[coroutine] |path_str: String| {
+    //                 let paths = fs::read_dir(&path_str).expect("fuck you");
+    //                 for path in paths {
+    //                     match path {
+    //                         Ok(val) => {
+    //                             yield format!("{}", val.path().display());
+    //                         },
+    //                         Err(_) => continue
+    //                     }
+    //                 }
+    //             }),
+    //         add_routine!(#[coroutine]|path: String| {
+    //             match fs::metadata(&path) {
+    //                 Ok(md) => {
+    //                     if md.is_dir() {
+    //                         yield Err(path);
+    //                     } else {
+    //                         let value = fs::read_to_string(path).unwrap().parse().ok().unwrap();
+    //                         yield Ok(value);
+    //                     }
+    //                 },
+    //                 Err(_) => ()
+    //             }
+    //         })
+    //     );
+    //     
+    //     node.1.send("test/".to_string()).unwrap();
+    // 
+    //     let mut result = 0;
+    //     
+    //     loop {
+    //         match node.2.recv_timeout(Duration::from_secs(1)) {
+    //             Ok(value) => result += value,
+    //             Err(val) => break
+    //         }
+    //     }
+    //     node.3.store(true, Ordering::Relaxed);
+    //     node.0.join().unwrap();
+    // 
+    //     assert_eq!(result, 122);
+    // }
 }
