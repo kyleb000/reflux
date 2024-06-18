@@ -3,12 +3,12 @@
 
 use std::ops::{Coroutine, CoroutineState};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 
 
 /// Receives data from an external source and broadcasts the data via channels.
@@ -68,7 +68,7 @@ impl Inlet {
                     match Pin::new(&mut routine).resume(()) {
                         CoroutineState::Yielded(res) => {
                             let r: T = res.into();
-                            tx.send(r).unwrap();
+                            let _= tx.send(r);
                         }
                         _ => break
                     } 
@@ -106,16 +106,15 @@ impl Inlet {
 ///  use crossbeam_channel::Receiver;
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
+/// use std::thread::sleep;
 /// 
 /// let stop_flag = Arc::new(AtomicBool::new(false));
 /// let (test_tx, test_rx) = unbounded();
-/// let (data_tx, data_rx) = unbounded();
-/// let outlet= Outlet::new(move |test: String| {
+/// let (outlet, out_send)= Outlet::new(move |test: String| {
 /// test_tx.send(test).unwrap();
-/// eprintln!("fok");
-/// }, data_rx, stop_flag.clone());
+/// }, stop_flag.clone());
 /// 
-/// data_tx.send("Hello, world".to_string()).unwrap();
+/// out_send.send("Hello, world".to_string()).unwrap();
 /// 
 /// let data_recv = test_rx.recv().unwrap();
 /// stop_flag.store(true, Ordering::Relaxed);
@@ -138,10 +137,11 @@ impl Outlet {
     ///
     /// # Returns
     /// A `Outlet` object
-    pub fn new<T, F>(outlet_fn: F, receiver: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self
+    pub fn new<T, F>(outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
         where
             T: Send + 'static,
             F: Fn(T) + Send + 'static {
+        let (sender, receiver) = unbounded();
         let outlet = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
@@ -149,14 +149,109 @@ impl Outlet {
                 }
             }
         });
-        Self {
+        (Self {
             outlet_fn: outlet
-        }
+        }, sender)
     }
     
     /// Waits for the `Outlet` object to finish execution
     pub fn join(self) -> thread::Result<()> {
         self.outlet_fn.join()?;
+        Ok(())
+    }
+}
+
+/// An object that received data from a provided `Receiver`, and broadcasts the data to all
+/// subscribers.
+///
+/// Using an `Outlet` yields the following benefits:
+/// - Abstracts away the use of channels. You only need to receive a parameter and send it to an
+/// external sink
+/// - The function does not have to be aware of termination signals, or joining threads. This
+/// functionality is handled by `Outlet`.
+/// - Easy integration with other `Reflux` modules.
+///
+/// # Example
+/// ```
+///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+///  #![feature(unboxed_closures)]
+/// use reflux::{Inlet, Outlet, Broadcast};
+///  use std::sync::Arc;
+///  use std::sync::atomic::{AtomicBool, Ordering};
+///  use crossbeam_channel::Receiver;
+///  use reflux::add_routine;
+///  use crossbeam_channel::unbounded;
+/// use std::time::Duration;
+/// use std::thread::sleep;
+/// let stop_flag = Arc::new(AtomicBool::new(false));
+/// 
+/// let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
+///             sleep(Duration::from_secs(1));
+///             yield "hello".to_string()
+///         }), stop_flag.clone());
+/// 
+/// let (test_outlet1_sink, test_outlet1_source) = unbounded();
+/// let (test_outlet2_sink, test_outlet2_source) = unbounded();
+/// 
+/// let (test_outlet1, test1_tx) = Outlet::new(move |example: String| {
+/// test_outlet1_sink.send(format!("1: {example}")).unwrap()
+/// }, stop_flag.clone());
+/// 
+/// let (test_outlet2, test2_tx) = Outlet::new(move |example: String| {
+/// test_outlet2_sink.send(format!("2: {example}")).unwrap()
+/// }, stop_flag.clone());
+/// 
+/// let mut broadcaster = Broadcast::new(test_inlet.1, stop_flag.clone());
+/// broadcaster.subscribe(test1_tx);
+/// broadcaster.subscribe(test2_tx);
+/// 
+/// let data1 = test_outlet1_source.recv().unwrap();
+/// let data2 = test_outlet2_source.recv().unwrap();
+/// 
+/// stop_flag.store(true, Ordering::Relaxed);
+/// 
+/// test_outlet1.join().unwrap();
+/// test_outlet2.join().unwrap();
+/// test_inlet.0.join().unwrap();
+/// broadcaster.join().unwrap();
+/// 
+/// 
+/// assert_eq!(data1, "1: hello".to_string());
+/// assert_eq!(data2, "2: hello".to_string());
+/// ```
+pub struct Broadcast<T> {
+    subscribers: Arc<Mutex<Vec<Sender<T>>>>,
+    _broadcaster: JoinHandle<()>,
+}
+
+impl<T> Broadcast<T> where T: Clone + Send + 'static {
+    pub fn new(source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self {
+        let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
+        
+        let thr_subscribers = subscribers.clone();
+        let broadcaster = thread::spawn(move || {
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
+                    let subscribers_lock = thr_subscribers.lock().unwrap();
+                    for subscriber in subscribers_lock.iter() {
+                        subscriber.send(data.clone()).unwrap();
+                    };           
+                }
+            }
+        });
+        Self {
+            subscribers,
+            _broadcaster: broadcaster
+        }
+    }
+    
+    pub fn subscribe(&mut self, subscriber: Sender<T>) {
+        let mut subscribers_lock = self.subscribers.lock().unwrap();
+        subscribers_lock.push(subscriber)
+    }
+
+    pub fn join(self) -> thread::Result<()> {
+        self._broadcaster.join()?;
         Ok(())
     }
 }
@@ -174,6 +269,7 @@ macro_rules! add_routine {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::thread::sleep;
     use std::time::Duration;
     use super::*;
     
@@ -197,11 +293,9 @@ mod tests {
     fn outlet_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (test_tx, test_rx) = unbounded();
-        let (data_tx, data_rx) = unbounded();
-        let outlet= Outlet::new(move |test: String| {
+        let (outlet, data_tx) = Outlet::new(move |test: String| {
             test_tx.send(test).unwrap();
-            eprintln!("fok");
-        }, data_rx, stop_flag.clone());
+        }, stop_flag.clone());
 
         data_tx.send("Hello, world".to_string()).unwrap();
 
@@ -211,50 +305,43 @@ mod tests {
 
         assert_eq!(data_recv, "Hello, world".to_string())
     }
+    
+    #[test]
+    fn broadcast_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        
+        let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
+            sleep(Duration::from_secs(1));
+            yield "hello".to_string()
+        }), stop_flag.clone());
 
-    // #[test]
-    // fn it_works() {
-    //     let node = ComputeNode::<String, String, usize>::new(
-    //         add_routine!(
-    //             #[coroutine] |path_str: String| {
-    //                 let paths = fs::read_dir(&path_str).expect("fuck you");
-    //                 for path in paths {
-    //                     match path {
-    //                         Ok(val) => {
-    //                             yield format!("{}", val.path().display());
-    //                         },
-    //                         Err(_) => continue
-    //                     }
-    //                 }
-    //             }),
-    //         add_routine!(#[coroutine]|path: String| {
-    //             match fs::metadata(&path) {
-    //                 Ok(md) => {
-    //                     if md.is_dir() {
-    //                         yield Err(path);
-    //                     } else {
-    //                         let value = fs::read_to_string(path).unwrap().parse().ok().unwrap();
-    //                         yield Ok(value);
-    //                     }
-    //                 },
-    //                 Err(_) => ()
-    //             }
-    //         })
-    //     );
-    //     
-    //     node.1.send("test/".to_string()).unwrap();
-    // 
-    //     let mut result = 0;
-    //     
-    //     loop {
-    //         match node.2.recv_timeout(Duration::from_secs(1)) {
-    //             Ok(value) => result += value,
-    //             Err(val) => break
-    //         }
-    //     }
-    //     node.3.store(true, Ordering::Relaxed);
-    //     node.0.join().unwrap();
-    // 
-    //     assert_eq!(result, 122);
-    // }
+        let (test_outlet1_sink, test_outlet1_source) = unbounded();
+        let (test_outlet2_sink, test_outlet2_source) = unbounded();
+        
+        let (test_outlet1, test1_tx) = Outlet::new(move |example: String| {
+            test_outlet1_sink.send(format!("1: {example}")).unwrap()
+        }, stop_flag.clone());
+
+        let (test_outlet2, test2_tx) = Outlet::new(move |example: String| {
+            test_outlet2_sink.send(format!("2: {example}")).unwrap()
+        }, stop_flag.clone());
+        
+        let mut broadcaster = Broadcast::new(test_inlet.1, stop_flag.clone());
+        broadcaster.subscribe(test1_tx);
+        broadcaster.subscribe(test2_tx);
+        
+        let data1 = test_outlet1_source.recv().unwrap();
+        let data2 = test_outlet2_source.recv().unwrap();
+        
+        stop_flag.store(true, Ordering::Relaxed);
+
+        test_outlet1.join().unwrap();
+        test_outlet2.join().unwrap();
+        test_inlet.0.join().unwrap();
+        broadcaster.join().unwrap();
+        
+        
+        assert_eq!(data1, "1: hello".to_string());
+        assert_eq!(data2, "2: hello".to_string());
+    }
 }
