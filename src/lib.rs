@@ -164,12 +164,9 @@ impl Outlet {
 /// An object that received data from a provided `Receiver`, and broadcasts the data to all
 /// subscribers.
 ///
-/// Using an `Outlet` yields the following benefits:
-/// - Abstracts away the use of channels. You only need to receive a parameter and send it to an
-/// external sink
-/// - The function does not have to be aware of termination signals, or joining threads. This
-/// functionality is handled by `Outlet`.
-/// - Easy integration with other `Reflux` modules.
+/// Using a `Broadcast` yields the following benefits:
+/// - Send received data to multiple endpoint. A `Broadcast` object can be used to build a web
+/// of objects.
 ///
 /// # Example
 /// ```
@@ -256,6 +253,91 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     }
 }
 
+
+/// An object that received data from a provided `Receiver`, and broadcasts the data to subscribers
+/// using a Round Robin algorithm.
+///
+/// Using a `Router` yields the following benefits:
+/// - Distribute data among multiple receivers, thus ensuring an even distribution of workload.
+///
+/// # Example
+/// ```
+///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+///  #![feature(unboxed_closures)]
+/// use reflux::Router;
+///  use std::sync::Arc;
+///  use std::sync::atomic::{AtomicBool, Ordering};
+///  use crossbeam_channel::Receiver;
+///  use reflux::add_routine;
+///  use crossbeam_channel::unbounded;
+/// use std::time::Duration;
+/// use std::thread::sleep;
+/// let stop_flag = Arc::new(AtomicBool::new(false));
+/// let stop_flag = Arc::new(AtomicBool::new(false));
+///         
+///  let (tx, rx) = unbounded();
+///         
+///  let mut router= Router::new(rx, stop_flag.clone());
+///         
+///  let (in1, out1) = unbounded();
+///  let (in2, out2) = unbounded();
+///         
+///  router.subscribe(in1);
+///  router.subscribe(in2);
+///         
+///  tx.send("hello".to_string()).unwrap();
+///  tx.send("there".to_string()).unwrap();
+///  tx.send("beautiful".to_string()).unwrap();
+///  tx.send("world".to_string()).unwrap();
+///         
+///  let out1_res = out1.recv().unwrap();
+///  let out2_res = out2.recv().unwrap();
+///  let out3_res = out1.recv().unwrap();
+///  let out4_res = out2.recv().unwrap();
+///         
+///  assert_eq!(out1_res, "hello".to_string());
+///  assert_eq!(out2_res, "there".to_string());
+///  assert_eq!(out3_res, "beautiful".to_string());
+///  assert_eq!(out4_res, "world".to_string());
+/// ```
+pub struct Router <T>  {
+    subscribers: Arc<Mutex<Vec<Sender<T>>>>,
+    _dispatcher: JoinHandle<()>,
+}
+
+
+impl <T> Router<T> where T: Send + 'static {
+    pub fn new(source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self {
+        let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
+
+        let thr_subscribers = subscribers.clone();
+        let dispatcher = thread::spawn(move || {
+            let mut pointer = 0;
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
+                    let subscribers_lock = thr_subscribers.lock().unwrap();
+                    subscribers_lock.get(pointer).unwrap().send(data).unwrap();
+                    pointer = (pointer + 1) % subscribers_lock.len();
+                }
+            }
+        });
+        Self {
+            subscribers,
+            _dispatcher: dispatcher
+        }
+    }
+
+    pub fn subscribe(&mut self, subscriber: Sender<T>) {
+        let mut subscribers_lock = self.subscribers.lock().unwrap();
+        subscribers_lock.push(subscriber)
+    }
+
+    pub fn join(self) -> thread::Result<()> {
+        self._dispatcher.join()?;
+        Ok(())
+    }
+}
+
 /// A simple macro to create a function that returns a coroutine.
 #[macro_export]
 macro_rules! add_routine {
@@ -268,7 +350,6 @@ macro_rules! add_routine {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::thread::sleep;
     use std::time::Duration;
     use super::*;
@@ -343,5 +424,35 @@ mod tests {
         
         assert_eq!(data1, "1: hello".to_string());
         assert_eq!(data2, "2: hello".to_string());
+    }
+    
+    #[test]
+    fn router_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        
+        let (tx, rx) = unbounded();
+        
+        let mut router= Router::new(rx, stop_flag.clone());
+        
+        let (in1, out1) = unbounded();
+        let (in2, out2) = unbounded();
+        
+        router.subscribe(in1);
+        router.subscribe(in2);
+        
+        tx.send("hello".to_string()).unwrap();
+        tx.send("there".to_string()).unwrap();
+        tx.send("beautiful".to_string()).unwrap();
+        tx.send("world".to_string()).unwrap();
+        
+        let out1_res = out1.recv().unwrap();
+        let out2_res = out2.recv().unwrap();
+        let out3_res = out1.recv().unwrap();
+        let out4_res = out2.recv().unwrap();
+        
+        assert_eq!(out1_res, "hello".to_string());
+        assert_eq!(out2_res, "there".to_string());
+        assert_eq!(out3_res, "beautiful".to_string());
+        assert_eq!(out4_res, "world".to_string());
     }
 }
