@@ -338,6 +338,81 @@ impl <T> Router<T> where T: Send + 'static {
     }
 }
 
+// struct Transformer{
+// 
+// }
+// 
+// impl Transformer {
+//     pub fn new<F, C, I, O>(inlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<I>, Receiver<O>)
+//         where
+//             F: Fn() -> C + Send + 'static,
+//             C: Coroutine<()> + Send + 'static + Unpin,
+//             T: Send + 'static + From<<C as Coroutine<()>>::Yield> {
+//         let (tx, rx) = unbounded();
+//         let inlet_thr = thread::spawn(move || {
+//             while !stop_sig.load(Ordering::Relaxed) {
+//                 let mut routine = inlet_fn();
+//                 loop {
+//                     match Pin::new(&mut routine).resume(()) {
+//                         CoroutineState::Yielded(res) => {
+//                             let r: T = res.into();
+//                             let _= tx.send(r);
+//                         }
+//                         _ => break
+//                     }
+//                 }
+//             }
+//         });
+//     }
+
+
+/// An object that uses a predicate function to determine whether some data can be passed through a network node
+///
+/// Using a `Filter` yields the following benefits:
+/// - Conditionally allow data to flow through a `Reflux` network
+///
+pub struct Filter {
+    _filter_thr: JoinHandle<()>,
+}
+
+impl Filter {
+    /// Creates a new `Filter` object.
+    ///
+    /// # Parameters
+    /// - `filter` - A function that takes a reference, determines if the data meets some condition and returns a boolean.
+    /// - `source` - A `Receiver` channel object from which to receive data.
+    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    ///
+    /// # Returns
+    ///  - A `Filter` object
+    ///  - A `Receiver`
+    pub fn new<T, F>(filter_fn: F, source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> (Self, Receiver<T>)
+    where
+        T: Send + 'static,
+        F: Fn(&T) -> bool + Send + 'static {
+        let (sender, receiver) = unbounded();
+        let filter = thread::spawn(move || {
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
+                    if filter_fn(&data) {
+                        sender.send(data).unwrap()
+                    }
+                }
+            }
+        });
+        (Self {
+            _filter_thr: filter
+        }, receiver)
+    }
+
+    /// Waits for the `Outlet` object to finish execution
+    pub fn join(self) -> thread::Result<()> {
+        self._filter_thr.join()?;
+        Ok(())
+    }
+}
+
+
 /// A simple macro to create a function that returns a coroutine.
 #[macro_export]
 macro_rules! add_routine {
@@ -350,6 +425,7 @@ macro_rules! add_routine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::RecvTimeoutError;
     use std::thread::sleep;
     use std::time::Duration;
     use super::*;
@@ -454,5 +530,35 @@ mod tests {
         assert_eq!(out2_res, "there".to_string());
         assert_eq!(out3_res, "beautiful".to_string());
         assert_eq!(out4_res, "world".to_string());
+    }
+
+    #[test]
+    fn filter_works() {
+        let fun = |data: &String| -> bool {
+            data.contains("hello")
+        };
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let (tx, rx) = unbounded();
+
+        let (filter, filter_sink) = Filter::new(fun, rx, stop_flag.clone());
+
+        tx.send("hello world".to_string()).unwrap();
+        let data = filter_sink.recv().unwrap();
+
+        assert_eq!(data, "hello world");
+
+        tx.send("goodbye world".to_string()).unwrap();
+        let res = filter_sink.recv_timeout(Duration::from_secs(1));
+        assert!(res.is_err());
+
+        tx.send("hello there".to_string()).unwrap();
+        let data = filter_sink.recv().unwrap();
+
+        assert_eq!(data, "hello there");
+        
+        stop_flag.store(true, Ordering::Relaxed);
+        filter.join().unwrap()
     }
 }
