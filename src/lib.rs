@@ -137,10 +137,10 @@ impl Outlet {
     ///
     /// # Returns
     /// A `Outlet` object
-    pub fn new<T, F>(outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
+    pub fn new<T, F>(mut outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
         where
             T: Send + 'static,
-            F: Fn(T) + Send + 'static {
+            F: FnMut(T) + Send + 'static {
         let (sender, receiver) = unbounded();
         let outlet = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
@@ -245,6 +245,13 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     pub fn subscribe(&mut self, subscriber: Sender<T>) {
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(subscriber)
+    }
+    
+    pub fn channel(&mut self) -> Receiver<T> {
+        let (tx, rx) = unbounded();
+        let mut subscribers_lock = self.subscribers.lock().unwrap();
+        subscribers_lock.push(tx);
+        rx
     }
 
     pub fn join(self) -> thread::Result<()> {
@@ -487,8 +494,13 @@ mod tests {
         broadcaster.subscribe(test1_tx);
         broadcaster.subscribe(test2_tx);
         
+        let chan1 = broadcaster.channel();
+        let chan2 = broadcaster.channel();
+        
         let data1 = test_outlet1_source.recv().unwrap();
         let data2 = test_outlet2_source.recv().unwrap();
+        let data3 = chan1.recv().unwrap();
+        let data4 = chan2.recv().unwrap();
         
         stop_flag.store(true, Ordering::Relaxed);
 
@@ -500,6 +512,8 @@ mod tests {
         
         assert_eq!(data1, "1: hello".to_string());
         assert_eq!(data2, "2: hello".to_string());
+        assert_eq!(data3, "hello".to_string());
+        assert_eq!(data4, "hello".to_string());
     }
     
     #[test]

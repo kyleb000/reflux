@@ -1,11 +1,11 @@
 [package]
 name = "reflux"
-version = "1.1.2"
+version = "1.1.4"
 edition = "2021"
 license = "GPL-3.0"
 homepage = "https://github.com/kyleb000/reflux/wiki"
 repository = "https://github.com/kyleb000/reflux"
-description = "Reflux is a Rust library designed to simplify the creation of scalable distributed computing architectures. Whether you're building complex distributed systems or looking to streamline your parallel processing tasks, Reflux provides a robust and efficient foundation."
+description = "A microservice framework aimed at scalability, flexibility and ease of use"
 readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
