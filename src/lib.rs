@@ -1,6 +1,8 @@
 #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 #![feature(unboxed_closures)]
 
+use std::fmt::Display;
+use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -11,7 +13,19 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 
-/// Receives data from an external source and broadcasts the data via channels.
+/// An enum returned from a coroutine sent to a `Transformer` object.
+/// 
+/// The following variants work as follows:
+/// - `Transformed` - Data has been mutated and can be sent along a `Reflux` network
+/// - `NeedsMoreWork` - Data has been processed, but is not ready to be sent through the network.
+/// - `Error` - An error occurred when processing data
+pub enum TransformerResult<O, T, E> {
+    Transformed(T),
+    NeedsMoreWork(O),
+    Error(E),
+}
+
+/// Receives data from an external source and sends the data through a channel.
 ///
 /// Using an `Inlet` yields the following benefits:
 /// - Abstracts away the use of channels. You only need to write a coroutine that takes a parameter
@@ -136,7 +150,8 @@ impl Outlet {
     /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
     ///
     /// # Returns
-    /// A `Outlet` object
+    /// - An `Outlet` object
+    /// - A `Sender` to send data out to.
     pub fn new<T, F>(mut outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
         where
             T: Send + 'static,
@@ -222,6 +237,14 @@ pub struct Broadcast<T> {
 }
 
 impl<T> Broadcast<T> where T: Clone + Send + 'static {
+    /// Creates a new `Broadcast` object.
+    ///
+    /// # Parameters
+    /// - `source` - The source of data that needs to be broadcast 
+    /// - `stop_sig` - A flag to signal the `Broadcast` object to terminate
+    ///
+    /// # Returns
+    /// A `Broadcast` object
     pub fn new(source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
         
@@ -241,12 +264,20 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
             _broadcaster: broadcaster
         }
     }
-    
+
+    /// Add a subscriber to the `Broadcast`
+    ///
+    /// # Parameters
+    ///  - `subscriber` - A `Sender` with which to send data to.
     pub fn subscribe(&mut self, subscriber: Sender<T>) {
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(subscriber)
     }
     
+    /// Create a subscription for an external object to use to receive data from the `Broadcast`
+    /// 
+    /// # Returns
+    /// - A `Receiver` object from which to receive data.
     pub fn channel(&mut self) -> Receiver<T> {
         let (tx, rx) = unbounded();
         let mut subscribers_lock = self.subscribers.lock().unwrap();
@@ -254,6 +285,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
         rx
     }
 
+    /// Waits for the `Broadcast` object to finish execution
     pub fn join(self) -> thread::Result<()> {
         self._broadcaster.join()?;
         Ok(())
@@ -314,6 +346,14 @@ pub struct Router <T>  {
 
 
 impl <T> Router<T> where T: Send + 'static {
+    /// Creates a new `Router` object.
+    ///
+    /// # Parameters
+    /// - `source` - The source of data that needs to be routed 
+    /// - `stop_sig` - A flag to signal the `Router` object to terminate
+    ///
+    /// # Returns
+    /// A `Router` object
     pub fn new(source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
 
@@ -334,43 +374,161 @@ impl <T> Router<T> where T: Send + 'static {
         }
     }
 
+    /// Add a subscriber to the `Router`
+    /// 
+    /// # Parameters
+    ///  - `subscriber` - A `Sender` with which to send data to.
     pub fn subscribe(&mut self, subscriber: Sender<T>) {
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(subscriber)
     }
 
+    /// Waits for the `Router` object to finish execution
     pub fn join(self) -> thread::Result<()> {
         self._dispatcher.join()?;
         Ok(())
     }
 }
 
-// struct Transformer{
-// 
-// }
-// 
-// impl Transformer {
-//     pub fn new<F, C, I, O>(inlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<I>, Receiver<O>)
-//         where
-//             F: Fn() -> C + Send + 'static,
-//             C: Coroutine<()> + Send + 'static + Unpin,
-//             T: Send + 'static + From<<C as Coroutine<()>>::Yield> {
-//         let (tx, rx) = unbounded();
-//         let inlet_thr = thread::spawn(move || {
-//             while !stop_sig.load(Ordering::Relaxed) {
-//                 let mut routine = inlet_fn();
-//                 loop {
-//                     match Pin::new(&mut routine).resume(()) {
-//                         CoroutineState::Yielded(res) => {
-//                             let r: T = res.into();
-//                             let _= tx.send(r);
-//                         }
-//                         _ => break
-//                     }
-//                 }
-//             }
-//         });
-//     }
+pub struct TransformerContext<D, G> {
+    pub globals: G,
+    pub data: Option<D>
+}
+
+
+/// An object that enables data mutation. After processing data a `Transformer` can yield three variants:
+///  - `TransformerResult::Transformed` - The data has been processed and can move along the rest of the `Reflux` network
+///  - `TransformerResult::NeedsMoreWork` - The data still needs additional processing. The data is sent back into the `Transformer`
+///  - `TransformerResult::Error` - There was an error in processing the data. This error is simply logged to `stderr`
+///
+/// Using a `Transformer` yields the following benefits:
+///  - Mutation of data in a `Reflux` network.
+///
+/// # Example
+/// ```
+/// #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+///  #![feature(unboxed_closures)]
+/// use reflux::{Transformer, TransformerContext, TransformerResult};
+///  use std::sync::Arc;
+///  use std::sync::atomic::{AtomicBool, Ordering};
+///  use crossbeam_channel::{Receiver, Sender};
+///  use reflux::add_routine;
+///  use crossbeam_channel::unbounded;
+/// use std::time::Duration;
+/// use std::thread::sleep;
+/// #[derive(Clone)]
+///  struct InnerContext {
+///     inc_val: i32
+///  }
+///
+///  let ctx = InnerContext {
+///     inc_val: 1
+///  };
+///
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///
+///  let (transformer, input, output): (Transformer<i32, String, String>, Sender<i32>, Receiver<String>) = Transformer::new(
+///     add_routine!(#[coroutine] |input: TransformerContext<i32, InnerContext>| {
+///         let mut data = input.data.unwrap();
+///         while data < 5 {
+///             data += input.globals.inc_val;
+///             yield TransformerResult::NeedsMoreWork(data);
+///         }
+///     yield TransformerResult::Transformed(format!("The number is {data}"));
+///  }), stop_flag.clone(), ctx);
+///
+///  input.send(0).unwrap();
+///
+///  let result = output.recv().unwrap();
+///  stop_flag.store(true, Ordering::Relaxed);
+///  transformer.join().unwrap();
+///
+///  assert_eq!(result, "The number is 5".to_string())
+/// ```
+pub struct Transformer<I, O, E> {
+    _run_thr: JoinHandle<()>,
+    _i: PhantomData<I>,
+    _o: PhantomData<O>,
+    _e: PhantomData<E>,
+}
+
+impl<I, O, E> Transformer<I, O, E> {
+    /// Creates a new `Transformer` object.
+    ///
+    /// # Parameters
+    /// - `transform_fn` - A coroutine that will transform data.
+    ///     The use of the `add_routine!` macro is necessary when passing in a coroutine.
+    /// - `stop_sig` - A flag to signal the `Router` object to terminate
+    /// - `context` - An object of immutable values for the `transformer_fn` to use during computation
+    ///
+    /// # Returns
+    /// A `Transformer` object
+    pub fn new<Ctx, F, C>(transform_fn: F, stop_sig: Arc<AtomicBool>, context: Ctx) -> (Self, Sender<I>, Receiver<O>)
+    where
+        F: Fn() -> C + Send + 'static,
+        C: Coroutine<TransformerContext<I, Ctx>> + Send + 'static + Unpin,
+        Ctx: Send + 'static + Clone,
+        I: Send + 'static,
+        O: Send + 'static,
+        E: Send + 'static + Display,
+        TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<TransformerContext<I, Ctx>>>::Yield>,
+    {
+        let (in_tx, in_rx) = unbounded();
+        let (out_tx, out_rx) = unbounded();
+
+        let tx2 = in_tx.clone();
+        let new_ctx = context;
+        let run_thr = thread::spawn(move || {
+            while !stop_sig.load(Ordering::Relaxed) {
+                let mut routine = transform_fn();
+                loop {
+                    let in_data = match in_rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(val) => val,
+                        Err(_) => break
+                    };
+                    let coro_context = TransformerContext {
+                        globals: new_ctx.clone(),
+                        data: Some(in_data)
+                    };
+
+                    match Pin::new(&mut routine).resume(coro_context) {
+                        CoroutineState::Yielded(res) => {
+                            let r: TransformerResult<I, O, E> = res.into();
+                            match r {
+                                TransformerResult::Transformed(val) => {
+                                    out_tx.send(val).unwrap()
+                                }
+                                TransformerResult::NeedsMoreWork(val) => {
+                                    tx2.send(val).unwrap()
+                                }
+                                TransformerResult::Error(val) => {
+                                    eprintln!("{val}");
+                                }
+                            }
+                        }
+                        _ => break
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                _run_thr: run_thr,
+                _i: Default::default(),
+                _o: Default::default(),
+                _e: Default::default(),
+            },
+            in_tx,
+            out_rx
+        )
+    }
+
+    /// Waits for the `Transformer` object to finish execution
+    pub fn join(self) -> thread::Result<()> {
+        self._run_thr.join()?;
+        Ok(())
+    }
+}
 
 
 /// An object that uses a predicate function to determine whether some data can be passed through a network node
@@ -378,6 +536,45 @@ impl <T> Router<T> where T: Send + 'static {
 /// Using a `Filter` yields the following benefits:
 /// - Conditionally allow data to flow through a `Reflux` network
 ///
+/// # Example
+/// ```
+///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+///  #![feature(unboxed_closures)]
+/// use reflux::Filter;
+///  use std::sync::Arc;
+///  use std::sync::atomic::{AtomicBool, Ordering};
+///  use crossbeam_channel::Receiver;
+///  use reflux::add_routine;
+///  use crossbeam_channel::unbounded;
+/// use std::time::Duration;
+/// use std::thread::sleep;
+/// let stop_flag = Arc::new(AtomicBool::new(false));
+/// let fun = |data: &String| -> bool {
+///     data.contains("hello")
+///  };
+/// 
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///  let (tx, rx) = unbounded();
+/// 
+///  let (filter, filter_sink) = Filter::new(fun, rx, stop_flag.clone());
+/// 
+///  tx.send("hello world".to_string()).unwrap();
+///  let data = filter_sink.recv().unwrap();
+/// 
+///  assert_eq!(data, "hello world");
+/// 
+///  tx.send("goodbye world".to_string()).unwrap();
+///  let res = filter_sink.recv_timeout(Duration::from_secs(1));
+///  assert!(res.is_err());
+/// 
+///  tx.send("hello there".to_string()).unwrap();
+///  let data = filter_sink.recv().unwrap();
+/// 
+///  assert_eq!(data, "hello there");
+///         
+///  stop_flag.store(true, Ordering::Relaxed);
+///  filter.join().unwrap()
+/// ```
 pub struct Filter {
     _filter_thr: JoinHandle<()>,
 }
@@ -412,7 +609,7 @@ impl Filter {
         }, receiver)
     }
 
-    /// Waits for the `Outlet` object to finish execution
+    /// Waits for the `Filter` object to finish execution
     pub fn join(self) -> thread::Result<()> {
         self._filter_thr.join()?;
         Ok(())
@@ -432,7 +629,6 @@ macro_rules! add_routine {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::RecvTimeoutError;
     use std::thread::sleep;
     use std::time::Duration;
     use super::*;
@@ -501,7 +697,7 @@ mod tests {
         let data2 = test_outlet2_source.recv().unwrap();
         let data3 = chan1.recv().unwrap();
         let data4 = chan2.recv().unwrap();
-        
+
         stop_flag.store(true, Ordering::Relaxed);
 
         test_outlet1.join().unwrap();
@@ -574,5 +770,37 @@ mod tests {
         
         stop_flag.store(true, Ordering::Relaxed);
         filter.join().unwrap()
+    }
+
+    #[test]
+    fn transformer_works() {
+        #[derive(Clone)]
+        struct InnerContext {
+            inc_val: i32
+        }
+
+        let ctx = InnerContext {
+            inc_val: 1
+        };
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let (transformer, input, output): (Transformer<i32, String, String>, Sender<i32>, Receiver<String>) = Transformer::new(
+            add_routine!(#[coroutine] |input: TransformerContext<i32, InnerContext>| {
+                let mut data = input.data.unwrap();
+                while data < 5 {
+                    data += input.globals.inc_val;
+                    yield TransformerResult::NeedsMoreWork(data);
+                }
+                yield TransformerResult::Transformed(format!("The number is {data}"));
+            }), stop_flag.clone(), ctx);
+
+        input.send(0).unwrap();
+
+        let result = output.recv().unwrap();
+        stop_flag.store(true, Ordering::Relaxed);
+        transformer.join().unwrap();
+
+        assert_eq!(result, "The number is 5".to_string())
     }
 }
