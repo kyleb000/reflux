@@ -47,7 +47,7 @@ pub enum TransformerResult<O, T, E> {
 ///  let (inlet, inlet_chan): (Inlet, Receiver<String>) = Inlet::new(
 ///      add_routine!(#[coroutine] |_: ()| {
 ///          yield "Hello, world".to_string()
-///      }), stop_flag.clone());
+///      }), stop_flag.clone(), ());
 ///
 ///  let data = inlet_chan.recv().unwrap();
 ///  stop_flag.store(true, Ordering::Relaxed);
@@ -69,17 +69,18 @@ impl Inlet {
     /// 
     /// # Returns
     /// A `Inlet` object and a `Receiver` to receive data from the `inlet_fn`
-    pub fn new<F, C, T>(inlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Receiver<T>)
+    pub fn new<F, C, T, I>(inlet_fn: F, stop_sig: Arc<AtomicBool>, init_data: I) -> (Self, Receiver<T>)
         where 
             F: Fn() -> C + Send + 'static,
-            C: Coroutine<()> + Send + 'static + Unpin,
-            T: Send + 'static + From<<C as Coroutine<()>>::Yield> {
+            I: Send + 'static + Clone,
+            C: Coroutine<I> + Send + 'static + Unpin,
+            T: Send + 'static + From<<C as Coroutine<I>>::Yield> {
         let (tx, rx) = unbounded();
         let inlet_thr = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 let mut routine = inlet_fn();
                 loop {
-                    match Pin::new(&mut routine).resume(()) {
+                    match Pin::new(&mut routine).resume(init_data.clone()) {
                         CoroutineState::Yielded(res) => {
                             let r: T = res.into();
                             let _= tx.send(r);
@@ -200,7 +201,7 @@ impl Outlet {
 ///  let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
 ///             sleep(Duration::from_secs(1));
 ///             yield "hello".to_string()
-///         }), stop_flag.clone());
+///         }), stop_flag.clone(), ());
 /// 
 ///  let (test_outlet1_sink, test_outlet1_source) = unbounded();
 ///  let (test_outlet2_sink, test_outlet2_source) = unbounded();
@@ -740,7 +741,7 @@ mod tests {
         let (inlet, inlet_chan): (Inlet, Receiver<String>) = Inlet::new(
             add_routine!(#[coroutine] |_: ()| {
                 yield "Hello, world".to_string()
-            }), stop_flag.clone());
+            }), stop_flag.clone(), ());
         
         
         let data = inlet_chan.recv().unwrap();
@@ -774,7 +775,7 @@ mod tests {
         let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
             sleep(Duration::from_secs(1));
             yield "hello".to_string()
-        }), stop_flag.clone());
+        }), stop_flag.clone(), ());
 
         let (test_outlet1_sink, test_outlet1_source) = unbounded();
         let (test_outlet2_sink, test_outlet2_source) = unbounded();
