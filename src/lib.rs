@@ -114,27 +114,27 @@ impl Inlet {
 /// 
 /// # Example
 /// ```
-/// use reflux::Outlet;
+///  use reflux::Outlet;
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
-/// use std::thread::sleep;
+///  use std::thread::sleep;
 /// 
-/// let stop_flag = Arc::new(AtomicBool::new(false));
-/// let (test_tx, test_rx) = unbounded();
-/// let (outlet, out_send)= Outlet::new(move |test: String| {
-/// test_tx.send(test).unwrap();
-/// }, stop_flag.clone());
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///  let (test_tx, test_rx) = unbounded();
+///  let (outlet, out_send)= Outlet::new(move |test: String| {
+///      test_tx.send(test).unwrap();
+///  }, stop_flag.clone());
 /// 
-/// out_send.send("Hello, world".to_string()).unwrap();
+///  out_send.send("Hello, world".to_string()).unwrap();
 /// 
-/// let data_recv = test_rx.recv().unwrap();
-/// stop_flag.store(true, Ordering::Relaxed);
-/// outlet.join().unwrap();
+///  let data_recv = test_rx.recv().unwrap();
+///  stop_flag.store(true, Ordering::Relaxed);
+///  outlet.join().unwrap();
 /// 
-/// assert_eq!(data_recv, "Hello, world".to_string())
+///  assert_eq!(data_recv, "Hello, world".to_string())
 /// ```
 pub struct Outlet {
     outlet_fn: JoinHandle<()>
@@ -187,49 +187,49 @@ impl Outlet {
 /// ```
 ///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
-/// use reflux::{Inlet, Outlet, Broadcast};
+///  use reflux::{Inlet, Outlet, Broadcast};
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
-/// use std::time::Duration;
-/// use std::thread::sleep;
-/// let stop_flag = Arc::new(AtomicBool::new(false));
+///  use std::time::Duration;
+///  use std::thread::sleep;
+///  let stop_flag = Arc::new(AtomicBool::new(false));
 /// 
-/// let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
+///  let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
 ///             sleep(Duration::from_secs(1));
 ///             yield "hello".to_string()
 ///         }), stop_flag.clone());
 /// 
-/// let (test_outlet1_sink, test_outlet1_source) = unbounded();
-/// let (test_outlet2_sink, test_outlet2_source) = unbounded();
+///  let (test_outlet1_sink, test_outlet1_source) = unbounded();
+///  let (test_outlet2_sink, test_outlet2_source) = unbounded();
 /// 
-/// let (test_outlet1, test1_tx) = Outlet::new(move |example: String| {
-/// test_outlet1_sink.send(format!("1: {example}")).unwrap()
-/// }, stop_flag.clone());
+///  let (test_outlet1, test1_tx) = Outlet::new(move |example: String| {
+///     test_outlet1_sink.send(format!("1: {example}")).unwrap()
+///  }, stop_flag.clone());
 /// 
-/// let (test_outlet2, test2_tx) = Outlet::new(move |example: String| {
-/// test_outlet2_sink.send(format!("2: {example}")).unwrap()
-/// }, stop_flag.clone());
+///  let (test_outlet2, test2_tx) = Outlet::new(move |example: String| {
+///      test_outlet2_sink.send(format!("2: {example}")).unwrap()
+///  }, stop_flag.clone());
 /// 
-/// let mut broadcaster = Broadcast::new(test_inlet.1, stop_flag.clone());
-/// broadcaster.subscribe(test1_tx);
-/// broadcaster.subscribe(test2_tx);
+///  let mut broadcaster = Broadcast::new(test_inlet.1, stop_flag.clone());
+///  broadcaster.subscribe(test1_tx);
+///  broadcaster.subscribe(test2_tx);
 /// 
-/// let data1 = test_outlet1_source.recv().unwrap();
-/// let data2 = test_outlet2_source.recv().unwrap();
+///  let data1 = test_outlet1_source.recv().unwrap();
+///  let data2 = test_outlet2_source.recv().unwrap();
 /// 
-/// stop_flag.store(true, Ordering::Relaxed);
+///  stop_flag.store(true, Ordering::Relaxed);
 /// 
-/// test_outlet1.join().unwrap();
-/// test_outlet2.join().unwrap();
-/// test_inlet.0.join().unwrap();
-/// broadcaster.join().unwrap();
+///  test_outlet1.join().unwrap();
+///  test_outlet2.join().unwrap();
+///  test_inlet.0.join().unwrap();
+///  broadcaster.join().unwrap();
 /// 
 /// 
-/// assert_eq!(data1, "1: hello".to_string());
-/// assert_eq!(data2, "2: hello".to_string());
+///  assert_eq!(data1, "1: hello".to_string());
+///  assert_eq!(data2, "2: hello".to_string());
 /// ```
 pub struct Broadcast<T> {
     subscribers: Arc<Mutex<Vec<Sender<T>>>>,
@@ -303,16 +303,16 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
 /// ```
 ///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
-/// use reflux::Router;
+///  use reflux::Router;
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
-/// use std::time::Duration;
-/// use std::thread::sleep;
-/// let stop_flag = Arc::new(AtomicBool::new(false));
-/// let stop_flag = Arc::new(AtomicBool::new(false));
+///  use std::time::Duration;
+///  use std::thread::sleep;
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///         
 ///  let (tx, rx) = unbounded();
 ///         
@@ -390,6 +390,106 @@ impl <T> Router<T> where T: Send + 'static {
     }
 }
 
+/// An object that receives data from multiple subscriber and channels the data to a single output.
+/// 
+/// Using a `Funnel` object yields the following benefits:
+///  - Consolidates data from multiple sources into a single data stream.
+/// 
+/// # Example
+/// ```
+///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+///  #![feature(unboxed_closures)]
+///  use reflux::Funnel;
+///  use std::sync::Arc;
+///  use std::sync::atomic::{AtomicBool, Ordering};
+///  use crossbeam_channel::Receiver;
+///  use reflux::add_routine;
+///  use crossbeam_channel::unbounded;
+///  use std::time::Duration;
+///  use std::thread::sleep;
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///  let stop_flag = Arc::new(AtomicBool::new(false));
+///         
+///  let (mut funnel, funnel_out) = Funnel::new(stop_flag.clone());
+///         
+///  let (rx1, tx1) = unbounded();
+///  let (rx2, tx2) = unbounded();
+///  let (rx3, tx3) = unbounded();
+///         
+///  funnel.add_source(tx1);
+///  funnel.add_source(tx2);
+///  funnel.add_source(tx3);
+///         
+///  rx1.send("hello".to_string()).unwrap();
+///  rx2.send("beautiful".to_string()).unwrap();
+///  rx3.send("world".to_string()).unwrap();
+///         
+///  let str1 = funnel_out.recv().unwrap();
+///  let str2 = funnel_out.recv().unwrap();
+///  let str3 = funnel_out.recv().unwrap();
+///         
+///  assert_eq!(str1, "hello");
+///  assert_eq!(str2, "beautiful");
+///  assert_eq!(str3, "world");
+///         
+///  stop_flag.store(true, Ordering::Relaxed);
+///         
+///  funnel.join().unwrap()
+/// ```
+pub struct Funnel<D> {
+    _funnel_fn: JoinHandle<()>,
+    receivers: Arc<Mutex<Vec<Receiver<D>>>>
+}
+
+impl<D> Funnel<D> 
+where D: Send + 'static {
+    /// Creates a new `Funnel` object
+    /// 
+    /// # Parameters
+    ///  - `stop_flag`: A flag to signal the termination of the `Funnel` instance.
+    /// 
+    /// # Returns
+    ///  - A `Funnel` instance
+    ///  - A `Receiver` channel for `Funnel` output
+    pub fn new(stop_flag: Arc<AtomicBool>) -> (Self, Receiver<D>) {
+        let receivers:Arc<Mutex<Vec<Receiver<D>>>> = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = unbounded();
+        
+        let worker_receivers = receivers.clone();
+        let funnel_worker = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                for receiver in worker_receivers.lock().unwrap().iter() {
+                    if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
+                        tx.send(data).unwrap()
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                _funnel_fn: funnel_worker,
+                receivers
+            }, rx
+        )
+    }
+
+    /// Add a data source to the `Funnel`
+    ///
+    /// # Parameters
+    ///  - `source` - A `Receiver` from which data are received
+    pub fn add_source(&mut self, source: Receiver<D>) {
+        self.receivers.lock().unwrap().push(source)
+    }
+
+    /// Waits for the `Funnel` object to finish execution
+    pub fn join(self) -> thread::Result<()> {
+        self._funnel_fn.join()?;
+        Ok(())
+    }
+}
+
+
 pub struct TransformerContext<D, G> {
     pub globals: G,
     pub data: Option<D>
@@ -406,17 +506,18 @@ pub struct TransformerContext<D, G> {
 ///
 /// # Example
 /// ```
-/// #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
+///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
-/// use reflux::{Transformer, TransformerContext, TransformerResult};
+///  use reflux::{Transformer, TransformerContext, TransformerResult};
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::{Receiver, Sender};
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
-/// use std::time::Duration;
-/// use std::thread::sleep;
-/// #[derive(Clone)]
+///  use std::time::Duration;
+///  use std::thread::sleep;
+/// 
+///  #[derive(Clone)]
 ///  struct InnerContext {
 ///     inc_val: i32
 ///  }
@@ -802,5 +903,36 @@ mod tests {
         transformer.join().unwrap();
 
         assert_eq!(result, "The number is 5".to_string())
+    }
+    
+    #[test]
+    fn funnel_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        
+        let (mut funnel, funnel_out) = Funnel::new(stop_flag.clone());
+        
+        let (rx1, tx1) = unbounded();
+        let (rx2, tx2) = unbounded();
+        let (rx3, tx3) = unbounded();
+        
+        funnel.add_source(tx1);
+        funnel.add_source(tx2);
+        funnel.add_source(tx3);
+        
+        rx1.send("hello".to_string()).unwrap();
+        rx2.send("beautiful".to_string()).unwrap();
+        rx3.send("world".to_string()).unwrap();
+        
+        let str1 = funnel_out.recv().unwrap();
+        let str2 = funnel_out.recv().unwrap();
+        let str3 = funnel_out.recv().unwrap();
+        
+        assert_eq!(str1, "hello");
+        assert_eq!(str2, "beautiful");
+        assert_eq!(str3, "world");
+        
+        stop_flag.store(true, Ordering::Relaxed);
+        
+        funnel.join().unwrap()
     }
 }
