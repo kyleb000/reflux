@@ -2,7 +2,7 @@
 name = "reflux"
 version = "1.1.8"
 edition = "2021"
-license = "GPL-3.0"
+license = "LGPL-3"
 homepage = "https://github.com/kyleb000/reflux/wiki"
 repository = "https://github.com/kyleb000/reflux"
 description = "A microservice framework aimed at scalability, flexibility and ease of use"
