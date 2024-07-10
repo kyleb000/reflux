@@ -598,13 +598,15 @@ impl<I, O, E> Transformer<I, O, E> {
                             let r: TransformerResult<I, O, E> = res.into();
                             match r {
                                 TransformerResult::Transformed(val) => {
-                                    out_tx.send(val).unwrap()
+                                    out_tx.send(val).unwrap();
+                                    break
                                 }
                                 TransformerResult::NeedsMoreWork(val) => {
                                     tx2.send(val).unwrap()
                                 }
                                 TransformerResult::Error(val) => {
                                     eprintln!("{val}");
+                                    break
                                 }
                             }
                         }
