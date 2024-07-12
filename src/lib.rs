@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::thread::JoinHandle;
+use std::thread::{JoinHandle, sleep};
 use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -16,9 +16,10 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 /// An enum returned from a coroutine sent to a `Transformer` object.
 /// 
 /// The following variants work as follows:
-/// - `Transformed` - Data has been mutated and can be sent along a `Reflux` network
+/// - `Transformed` - Data has been mutated and can be sent along a `Reflux` network.
 /// - `NeedsMoreWork` - Data has been processed, but is not ready to be sent through the network.
-/// - `Error` - An error occurred when processing data
+/// - `Error` - An error occurred when processing data.
+#[derive(Debug, Copy, Clone)]
 pub enum TransformerResult<O, T, E> {
     Transformed(T),
     NeedsMoreWork(O),
@@ -27,11 +28,11 @@ pub enum TransformerResult<O, T, E> {
 
 /// Receives data from an external source and sends the data through a channel.
 ///
-/// Using an `Inlet` yields the following benefits:
+/// Using an `Extractor` yields the following benefits:
 /// - Abstracts away the use of channels. You only need to write a coroutine that takes a parameter
 /// and yields a result.
 /// - The coroutine does not have to be aware of termination signals, or joining threads. This
-/// functionality is handled by `Inlet`.
+/// functionality is handled by `Extractor`.
 /// - Easy integration with other `Reflux` modules.
 ///
 /// # Example
@@ -42,34 +43,39 @@ pub enum TransformerResult<O, T, E> {
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
 ///  use reflux::add_routine;
-///  use reflux::Inlet;
+///  use reflux::Extractor;
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
-///  let (inlet, inlet_chan): (Inlet, Receiver<String>) = Inlet::new(
+///  let (extractor, inlet_chan): (Extractor, Receiver<String>) = Extractor::new(
 ///      add_routine!(#[coroutine] |_: ()| {
 ///          yield "Hello, world".to_string()
-///      }), stop_flag.clone(), ());
+///      }), stop_flag.clone(), None, ());
 ///
 ///  let data = inlet_chan.recv().unwrap();
 ///  stop_flag.store(true, Ordering::Relaxed);
-///  inlet.join().unwrap();
+///  extractor.join().unwrap();
 ///
 ///  assert_eq!(data, "Hello, world".to_string())
 /// ```
-pub struct Inlet {
-    inlet_fn: JoinHandle<()>,
+pub struct Extractor {
+    extract_fn: JoinHandle<()>,
 }
 
-impl Inlet {
-    /// Creates a new `Inlet` object.
+impl Extractor {
+    /// Creates a new `Extractor` object.
     /// 
     /// # Parameters
-    /// - `inlet_fn` - A coroutine that reads and returns data from an external source.
-    /// The use of the `add_routine!` macro is necessary when passing in an `inlet_fn`.
-    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    /// - `extract_fn` - A coroutine that reads and returns data from an external source.
+    /// The use of the `add_routine!` macro is necessary when passing in an `extract_fn`.
+    /// - `pause_sig` - A flag to signal the `Extractor` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Extractor` object to terminate execution.
     /// 
     /// # Returns
-    /// A `Inlet` object and a `Receiver` to receive data from the `inlet_fn`
-    pub fn new<F, C, T, I>(inlet_fn: F, stop_sig: Arc<AtomicBool>, init_data: I) -> (Self, Receiver<T>)
+    ///  - A `Extractor` object.
+    ///  - A`Receiver` channel to receive data from the `extract_fn`.
+    pub fn new<F, C, T, I>(extract_fn: F,
+                           stop_sig: Arc<AtomicBool>,
+                           pause_sig: Option<Arc<AtomicBool>>,
+                           init_data: I) -> (Self, Receiver<T>)
         where 
             F: Fn() -> C + Send + 'static,
             I: Send + 'static + Clone,
@@ -78,7 +84,14 @@ impl Inlet {
         let (tx, rx) = unbounded();
         let inlet_thr = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
-                let mut routine = inlet_fn();
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
+                
+                let mut routine = extract_fn();
                 loop {
                     match Pin::new(&mut routine).resume(init_data.clone()) {
                         CoroutineState::Yielded(res) => {
@@ -91,31 +104,31 @@ impl Inlet {
             }
         });        
         let s = Self {
-            inlet_fn: inlet_thr,
+            extract_fn: inlet_thr,
         };
 
         (s, rx)
     }
     
-    /// Waits for the `Inlet` object to finish execution
+    /// Waits for the `Extractor` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self.inlet_fn.join()?;
+        self.extract_fn.join()?;
         Ok(())
     }
 }
 
 /// An object that receives data from a `Reflux` network and sends the data to some external sink.
 /// 
-/// Using an `Outlet` yields the following benefits:
+/// Using an `Loader` yields the following benefits:
 /// - Abstracts away the use of channels. You only need to receive a parameter and send it to an
-/// external sink
+/// external sink.
 /// - The function does not have to be aware of termination signals, or joining threads. This
-/// functionality is handled by `Outlet`.
+/// functionality is handled by `Loader`.
 /// - Easy integration with other `Reflux` modules.
 /// 
 /// # Example
 /// ```
-///  use reflux::Outlet;
+///  use reflux::Loader;
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
@@ -125,54 +138,63 @@ impl Inlet {
 /// 
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let (test_tx, test_rx) = unbounded();
-///  let (outlet, out_send)= Outlet::new(move |test: String| {
+///  let (loader, out_send)= Loader::new(move |test: String| {
 ///      test_tx.send(test).unwrap();
-///  }, stop_flag.clone());
+///  }, None, stop_flag.clone());
 /// 
 ///  out_send.send("Hello, world".to_string()).unwrap();
 /// 
 ///  let data_recv = test_rx.recv().unwrap();
 ///  stop_flag.store(true, Ordering::Relaxed);
-///  outlet.join().unwrap();
+///  loader.join().unwrap();
 /// 
 ///  assert_eq!(data_recv, "Hello, world".to_string())
 /// ```
-pub struct Outlet {
-    outlet_fn: JoinHandle<()>
+pub struct Loader {
+    loader_fn: JoinHandle<()>
 }
 
-impl Outlet {
-    /// Creates a new `Outlet` object.
+impl Loader {
+    /// Creates a new `Loader` object.
     ///
     /// # Parameters
-    /// - `outlet_fn` - A function that receives data from a `Reflux` network and sends it to an
+    /// - `loader_fn` - A function that receives data from a `Reflux` network and sends it to an
     /// external sink.
     /// - `receiver` - A `Receiver` channel object from which to receive data.
-    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    /// - `pause_sig` - A flag to signal the `Loader` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Loader` object to terminate execution.
     ///
     /// # Returns
-    /// - An `Outlet` object
-    /// - A `Sender` to send data out to.
-    pub fn new<T, F>(mut outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
+    /// - A `Loader` object.
+    /// - A `Sender` channel to send data out to.
+    pub fn new<T, F>(mut loader_fn: F,
+                     pause_sig: Option<Arc<AtomicBool>>,
+                     stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
         where
             T: Send + 'static,
             F: FnMut(T) + Send + 'static {
         let (sender, receiver) = unbounded();
-        let outlet = thread::spawn(move || {
+        let loader = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
                 if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
-                    outlet_fn(data)
+                    loader_fn(data)
                 }
             }
         });
         (Self {
-            outlet_fn: outlet
+            loader_fn: loader
         }, sender)
     }
     
-    /// Waits for the `Outlet` object to finish execution
+    /// Waits for the `Loader` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self.outlet_fn.join()?;
+        self.loader_fn.join()?;
         Ok(())
     }
 }
@@ -188,7 +210,7 @@ impl Outlet {
 /// ```
 ///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
-///  use reflux::{Inlet, Outlet, Broadcast};
+///  use reflux::{Extractor, Loader, Broadcast};
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
@@ -198,23 +220,23 @@ impl Outlet {
 ///  use std::thread::sleep;
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 /// 
-///  let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
+///  let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
 ///             sleep(Duration::from_secs(1));
 ///             yield "hello".to_string()
-///         }), stop_flag.clone(), ());
+///         }), stop_flag.clone(), None, ());
 /// 
 ///  let (test_outlet1_sink, test_outlet1_source) = unbounded();
 ///  let (test_outlet2_sink, test_outlet2_source) = unbounded();
 /// 
-///  let (test_outlet1, test1_tx) = Outlet::new(move |example: String| {
+///  let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
 ///     test_outlet1_sink.send(format!("1: {example}")).unwrap()
-///  }, stop_flag.clone());
+///  }, None, stop_flag.clone());
 /// 
-///  let (test_outlet2, test2_tx) = Outlet::new(move |example: String| {
+///  let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
 ///      test_outlet2_sink.send(format!("2: {example}")).unwrap()
-///  }, stop_flag.clone());
+///  }, None, stop_flag.clone());
 /// 
-///  let mut broadcaster = Broadcast::new(test_inlet.1, stop_flag.clone());
+///  let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone());
 ///  broadcaster.subscribe(test1_tx);
 ///  broadcaster.subscribe(test2_tx);
 /// 
@@ -241,17 +263,26 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     /// Creates a new `Broadcast` object.
     ///
     /// # Parameters
-    /// - `source` - The source of data that needs to be broadcast 
-    /// - `stop_sig` - A flag to signal the `Broadcast` object to terminate
+    /// - `source` - The source of data that needs to be broadcast.
+    /// - `pause_sig` - A flag to signal the `Broadcast` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Broadcast` object to terminate execution.
     ///
     /// # Returns
-    /// A `Broadcast` object
-    pub fn new(source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self {
+    /// A `Broadcast` object.
+    pub fn new(source: Receiver<T>,
+               pause_sig: Option<Arc<AtomicBool>>,
+               stop_sig: Arc<AtomicBool>) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
         
         let thr_subscribers = subscribers.clone();
         let broadcaster = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     let subscribers_lock = thr_subscribers.lock().unwrap();
                     for subscriber in subscribers_lock.iter() {
@@ -269,7 +300,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     /// Add a subscriber to the `Broadcast`
     ///
     /// # Parameters
-    ///  - `subscriber` - A `Sender` with which to send data to.
+    ///  - `subscriber` - A `Sender` with which to send data.
     pub fn subscribe(&mut self, subscriber: Sender<T>) {
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(subscriber)
@@ -278,7 +309,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     /// Create a subscription for an external object to use to receive data from the `Broadcast`
     /// 
     /// # Returns
-    /// - A `Receiver` object from which to receive data.
+    /// - A `Receiver` channel from which to receive data.
     pub fn channel(&mut self) -> Receiver<T> {
         let (tx, rx) = unbounded();
         let mut subscribers_lock = self.subscribers.lock().unwrap();
@@ -286,7 +317,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
         rx
     }
 
-    /// Waits for the `Broadcast` object to finish execution
+    /// Waits for the `Broadcast` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
         self._broadcaster.join()?;
         Ok(())
@@ -317,7 +348,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
 ///         
 ///  let (tx, rx) = unbounded();
 ///         
-///  let mut router= Router::new(rx, stop_flag.clone());
+///  let mut router= Router::new(rx, None, stop_flag.clone());
 ///         
 ///  let (in1, out1) = unbounded();
 ///  let (in2, out2) = unbounded();
@@ -350,18 +381,27 @@ impl <T> Router<T> where T: Send + 'static {
     /// Creates a new `Router` object.
     ///
     /// # Parameters
-    /// - `source` - The source of data that needs to be routed 
-    /// - `stop_sig` - A flag to signal the `Router` object to terminate
+    /// - `source` - The source of data that needs to be routed.
+    /// - `pause_sig` - A flag to signal the `Router` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Router` object to terminate execution.
     ///
     /// # Returns
-    /// A `Router` object
-    pub fn new(source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> Self {
+    /// A `Router` object.
+    pub fn new(source: Receiver<T>,
+               pause_sig: Option<Arc<AtomicBool>>,
+               stop_sig: Arc<AtomicBool>) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
 
         let thr_subscribers = subscribers.clone();
         let dispatcher = thread::spawn(move || {
             let mut pointer = 0;
             while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     let subscribers_lock = thr_subscribers.lock().unwrap();
                     subscribers_lock.get(pointer).unwrap().send(data).unwrap();
@@ -375,7 +415,7 @@ impl <T> Router<T> where T: Send + 'static {
         }
     }
 
-    /// Add a subscriber to the `Router`
+    /// Add a subscriber to the `Router`.
     /// 
     /// # Parameters
     ///  - `subscriber` - A `Sender` with which to send data to.
@@ -384,7 +424,7 @@ impl <T> Router<T> where T: Send + 'static {
         subscribers_lock.push(subscriber)
     }
 
-    /// Waits for the `Router` object to finish execution
+    /// Waits for the `Router` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
         self._dispatcher.join()?;
         Ok(())
@@ -412,7 +452,7 @@ impl <T> Router<T> where T: Send + 'static {
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///         
-///  let (mut funnel, funnel_out) = Funnel::new(stop_flag.clone());
+///  let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone());
 ///         
 ///  let (rx1, tx1) = unbounded();
 ///  let (rx2, tx2) = unbounded();
@@ -448,18 +488,25 @@ where D: Send + 'static {
     /// Creates a new `Funnel` object
     /// 
     /// # Parameters
-    ///  - `stop_flag`: A flag to signal the termination of the `Funnel` instance.
+    /// - `pause_sig` - A flag to signal the `Funnel` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Funnel` object to terminate execution.
     /// 
     /// # Returns
-    ///  - A `Funnel` instance
-    ///  - A `Receiver` channel for `Funnel` output
-    pub fn new(stop_flag: Arc<AtomicBool>) -> (Self, Receiver<D>) {
+    ///  - A `Funnel` object.
+    ///  - A `Receiver` channel for `Funnel` output.
+    pub fn new(pause_sig: Option<Arc<AtomicBool>>, stop_sig: Arc<AtomicBool>) -> (Self, Receiver<D>) {
         let receivers:Arc<Mutex<Vec<Receiver<D>>>> = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = unbounded();
         
         let worker_receivers = receivers.clone();
         let funnel_worker = thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
                 for receiver in worker_receivers.lock().unwrap().iter() {
                     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
                         tx.send(data).unwrap()
@@ -478,7 +525,7 @@ where D: Send + 'static {
     /// Add a data source to the `Funnel`
     ///
     /// # Parameters
-    ///  - `source` - A `Receiver` from which data are received
+    ///  - `source` - A `Receiver` channel from which data are received
     pub fn add_source(&mut self, source: Receiver<D>) {
         self.receivers.lock().unwrap().push(source)
     }
@@ -498,9 +545,9 @@ pub struct TransformerContext<D, G> {
 
 
 /// An object that enables data mutation. After processing data a `Transformer` can yield three variants:
-///  - `TransformerResult::Transformed` - The data has been processed and can move along the rest of the `Reflux` network
-///  - `TransformerResult::NeedsMoreWork` - The data still needs additional processing. The data is sent back into the `Transformer`
-///  - `TransformerResult::Error` - There was an error in processing the data. This error is simply logged to `stderr`
+///  - `TransformerResult::Transformed` - The data has been processed and can move along the rest of the `Reflux` network.
+///  - `TransformerResult::NeedsMoreWork` - The data still needs additional processing. The data is sent back into the `Transformer`.
+///  - `TransformerResult::Error` - There was an error in processing the data. This error is simply logged to `stderr`.
 ///
 /// Using a `Transformer` yields the following benefits:
 ///  - Mutation of data in a `Reflux` network.
@@ -537,7 +584,7 @@ pub struct TransformerContext<D, G> {
 ///             yield TransformerResult::NeedsMoreWork(data);
 ///         }
 ///     yield TransformerResult::Transformed(format!("The number is {data}"));
-///  }), stop_flag.clone(), ctx);
+///  }), None, stop_flag.clone(), ctx);
 ///
 ///  input.send(0).unwrap();
 ///
@@ -560,12 +607,16 @@ impl<I, O, E> Transformer<I, O, E> {
     /// # Parameters
     /// - `transform_fn` - A coroutine that will transform data.
     ///     The use of the `add_routine!` macro is necessary when passing in a coroutine.
-    /// - `stop_sig` - A flag to signal the `Router` object to terminate
-    /// - `context` - An object of immutable values for the `transformer_fn` to use during computation
+    /// - `pause_sig` - A flag to signal the `Transformer` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Transformer` object to terminate execution.
+    /// - `context` - An object of immutable values for the `transformer_fn` to use during computation.
     ///
     /// # Returns
-    /// A `Transformer` object
-    pub fn new<Ctx, F, C>(transform_fn: F, stop_sig: Arc<AtomicBool>, context: Ctx) -> (Self, Sender<I>, Receiver<O>)
+    /// A `Transformer` object.
+    pub fn new<Ctx, F, C>(transform_fn: F,
+                          pause_sig: Option<Arc<AtomicBool>>,
+                          stop_sig: Arc<AtomicBool>,
+                          context: Ctx) -> (Self, Sender<I>, Receiver<O>)
     where
         F: Fn() -> C + Send + 'static,
         C: Coroutine<TransformerContext<I, Ctx>> + Send + 'static + Unpin,
@@ -582,6 +633,12 @@ impl<I, O, E> Transformer<I, O, E> {
         let new_ctx = context;
         let run_thr = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
                 let mut routine = transform_fn();
                 loop {
                     let in_data = match in_rx.recv_timeout(Duration::from_millis(10)) {
@@ -660,7 +717,7 @@ impl<I, O, E> Transformer<I, O, E> {
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let (tx, rx) = unbounded();
 /// 
-///  let (filter, filter_sink) = Filter::new(fun, rx, stop_flag.clone());
+///  let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone());
 /// 
 ///  tx.send("hello world".to_string()).unwrap();
 ///  let data = filter_sink.recv().unwrap();
@@ -689,18 +746,28 @@ impl Filter {
     /// # Parameters
     /// - `filter` - A function that takes a reference, determines if the data meets some condition and returns a boolean.
     /// - `source` - A `Receiver` channel object from which to receive data.
-    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    /// - `pause_sig` - A flag to signal the `Filter` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Filter` object to terminate execution.
     ///
     /// # Returns
-    ///  - A `Filter` object
-    ///  - A `Receiver`
-    pub fn new<T, F>(filter_fn: F, source: Receiver<T>, stop_sig: Arc<AtomicBool>) -> (Self, Receiver<T>)
+    ///  - A `Filter` object.
+    ///  - A `Receiver` channel.
+    pub fn new<T, F>(filter_fn: F,
+                     source: Receiver<T>,
+                     pause_sig: Option<Arc<AtomicBool>>,
+                     stop_sig: Arc<AtomicBool>) -> (Self, Receiver<T>)
     where
         T: Send + 'static,
         F: Fn(&T) -> bool + Send + 'static {
         let (sender, receiver) = unbounded();
         let filter = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     if filter_fn(&data) {
                         sender.send(data).unwrap()
@@ -713,7 +780,7 @@ impl Filter {
         }, receiver)
     }
 
-    /// Waits for the `Filter` object to finish execution
+    /// Waits for the `Filter` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
         self._filter_thr.join()?;
         Ok(())
@@ -738,34 +805,34 @@ mod tests {
     use super::*;
     
     #[test]
-    fn inlet_works() {
+    fn extractor_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let (inlet, inlet_chan): (Inlet, Receiver<String>) = Inlet::new(
+        let (extractor, inlet_chan): (Extractor, Receiver<String>) = Extractor::new(
             add_routine!(#[coroutine] |_: ()| {
                 yield "Hello, world".to_string()
-            }), stop_flag.clone(), ());
+            }), stop_flag.clone(), None, ());
         
         
         let data = inlet_chan.recv().unwrap();
         stop_flag.store(true, Ordering::Relaxed);
-        inlet.join().unwrap();
+        extractor.join().unwrap();
         
         assert_eq!(data, "Hello, world".to_string())
     }
 
     #[test]
-    fn outlet_works() {
+    fn loader_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (test_tx, test_rx) = unbounded();
-        let (outlet, data_tx) = Outlet::new(move |test: String| {
+        let (loader, data_tx) = Loader::new(move |test: String| {
             test_tx.send(test).unwrap();
-        }, stop_flag.clone());
+        }, None, stop_flag.clone());
 
         data_tx.send("Hello, world".to_string()).unwrap();
 
         let data_recv = test_rx.recv().unwrap();
         stop_flag.store(true, Ordering::Relaxed);
-        outlet.join().unwrap();
+        loader.join().unwrap();
 
         assert_eq!(data_recv, "Hello, world".to_string())
     }
@@ -774,23 +841,23 @@ mod tests {
     fn broadcast_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         
-        let test_inlet: (Inlet, Receiver<String>) = Inlet::new(add_routine!(#[coroutine] || {
+        let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
             sleep(Duration::from_secs(1));
             yield "hello".to_string()
-        }), stop_flag.clone(), ());
+        }), stop_flag.clone(), None, ());
 
         let (test_outlet1_sink, test_outlet1_source) = unbounded();
         let (test_outlet2_sink, test_outlet2_source) = unbounded();
         
-        let (test_outlet1, test1_tx) = Outlet::new(move |example: String| {
+        let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
             test_outlet1_sink.send(format!("1: {example}")).unwrap()
-        }, stop_flag.clone());
+        }, None, stop_flag.clone());
 
-        let (test_outlet2, test2_tx) = Outlet::new(move |example: String| {
+        let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
             test_outlet2_sink.send(format!("2: {example}")).unwrap()
-        }, stop_flag.clone());
+        }, None, stop_flag.clone());
         
-        let mut broadcaster = Broadcast::new(test_inlet.1, stop_flag.clone());
+        let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone());
         broadcaster.subscribe(test1_tx);
         broadcaster.subscribe(test2_tx);
         
@@ -822,7 +889,7 @@ mod tests {
         
         let (tx, rx) = unbounded();
         
-        let mut router= Router::new(rx, stop_flag.clone());
+        let mut router= Router::new(rx, None, stop_flag.clone());
         
         let (in1, out1) = unbounded();
         let (in2, out2) = unbounded();
@@ -856,7 +923,7 @@ mod tests {
 
         let (tx, rx) = unbounded();
 
-        let (filter, filter_sink) = Filter::new(fun, rx, stop_flag.clone());
+        let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone());
 
         tx.send("hello world".to_string()).unwrap();
         let data = filter_sink.recv().unwrap();
@@ -897,7 +964,7 @@ mod tests {
                     yield TransformerResult::NeedsMoreWork(data);
                 }
                 yield TransformerResult::Transformed(format!("The number is {data}"));
-            }), stop_flag.clone(), ctx);
+            }), None, stop_flag.clone(), ctx);
 
         input.send(0).unwrap();
 
@@ -912,7 +979,7 @@ mod tests {
     fn funnel_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         
-        let (mut funnel, funnel_out) = Funnel::new(stop_flag.clone());
+        let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone());
         
         let (rx1, tx1) = unbounded();
         let (rx2, tx2) = unbounded();
