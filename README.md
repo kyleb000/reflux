@@ -13,7 +13,7 @@ In Reflux, there are various object types that are available.
 
  ![Extractor](https://github.com/user-attachments/assets/532d89e1-9274-4c7f-9362-1cbcaade428c)
  
- The extractor is responsible for reading data from an external source (such as a file or socket connection) and yielding data extracted from the source.
+ The `Extractor` is responsible for reading data from an external source (such as a file or socket connection) and yielding data extracted from the source.
 
  ### Transformer
 
@@ -26,6 +26,8 @@ In Reflux, there are various object types that are available.
   - Mutated data: A transformer returns a 'mutated' enum with the mutated data. This will pass the data along a Reflux pipeline.
   - Incomplete mutation - A transformer returns a 'needs more work' enum with the data in it's original type. This is used to feed the data back into the transformer for further processing. This behaviour is useful for recursive functions, such as walking through a directory tree.
   - Error - A transformer returns an 'error' enum with the error message.
+
+Note: As of version 1.2.0, the `Transformer` error handler simply prints the error to `stderr`.
 
 ### Router
 
@@ -41,6 +43,8 @@ The router is responsible for routing data amongst a set of `Receiver` s in a Ro
 
 The filter is responsible for conditionally allowing data to flow through a `Reflux` pipeline. A predicate is supplied to a `Filter` and if data satisfies the predicate, it may pass through.
 
+Advice: Use a pure function as a predicate with a complexity of O(1), if at all possible. Functions with a higher complexity, or that read data from a file or socket have the potential to prevent the predicate from completing execution, either through an error or an infitite loop.
+
 ### Broadcast
 
 ![Broadcast](https://github.com/user-attachments/assets/0c2a4395-4656-40cb-b70c-77b55df1158a)
@@ -49,12 +53,26 @@ The filter is responsible for conditionally allowing data to flow through a `Ref
 The `Broadcast` is responsible for broadcasting data to multiple `Sender` s.
 
 ### Funnel
+
+![Funnel](https://github.com/user-attachments/assets/f8b9d137-91b7-44c9-93f9-f715670fab67)
+
+
 The `Funnel` is responsible for collecting data from multiple `Receiver` s and sending the data through to a single `Sender`.
 
+Caution: The `Funnel` can potentially be a bottleneck in a `Reflux` pipeline, causing uncontrolled memory usage. It is advised to connect a small number of `Receiver`s to a `Funnel`.
+
 ### Messenger
+
+![Messenger](https://github.com/user-attachments/assets/04cdf716-4785-4ccc-8450-9286870cb2a9)
+
+
 The `Messenger` is responsible for receiving messages and passing it through to the relevant `Sender`.
 
 ### Loader
+
+![Loader](https://github.com/user-attachments/assets/e47211da-595a-4670-9fa8-7475db940c3f)
+
+
 The `Loader` is the end of a `Reflux` pipeline. A loader can drop data, or write it to an external source (such as a file or socket).
 
 ## Note: 
