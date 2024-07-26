@@ -9,11 +9,33 @@ Reflux is a cutting-edge Rust library designed to streamline the development of 
 # Reflux Objects
 In Reflux, there are various object types that are available.
 
- ### Extractor
+ ## Extractor
 
  ![Extractor](https://github.com/user-attachments/assets/532d89e1-9274-4c7f-9362-1cbcaade428c)
  
  The `Extractor` is responsible for reading data from an external source (such as a file or socket connection) and yielding data extracted from the source.
+
+ When using coroutines in the `Extractor`, there are two valid methods of yielding data:
+
+
+- In an infitite loop:
+```rust,no_run
+#[coroutine] || {
+    loop {
+        yield 1
+    }
+}
+```
+This method is useful if you are reading from a constant stream of data, such a socket.
+<br/><br/>
+
+- As a once-off statement:
+```rust,no_run
+#[coroutine] || {
+    yield 1
+}
+```
+This method is useful if you are reading from a data source one time, such as reading data from a file.
 
  ### Transformer
 
