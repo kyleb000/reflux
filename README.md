@@ -1,6 +1,10 @@
 # Reflux
 Reflux is a cutting-edge Rust library designed to streamline the development of microservices with a focus on scalability, flexibility, and usability. By leveraging Rust's performance and safety features, Reflux empowers developers to build robust, high-performance microservices that can seamlessly adapt to evolving business needs. Whether you're scaling up to handle millions of requests or integrating diverse service components, Reflux provides the tools and framework you need to achieve efficient and maintainable microservice architectures. Dive into Reflux and transform the way you build and manage microservices with ease and confidence.
 
+# When not to use Reflux
+- I/O bound applications. Reflux is designed for CPU-bound applications, where many tasks are run simultaneously. If your use case is I/O focused, it is recommended to use a runtime such as [Tokio](https://tokio.rs/).
+- Web servers. Reflux is best served for applications where the data flows in one direction (i.e extraction, transformation, and loading). Whilst it is possible to build a web server with Reflux, the implementaion will be clunky.
+
 # Use cases
 - Pipeline workflows
 - Routing
@@ -65,9 +69,9 @@ For example, the following code snippet will not compile:
 ```rust,no_run
 #[coroutine] || {
     let vals = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    for i in vals {
-        if i == 6 {
-            yield i;
+    for i in vals.iter() {
+        if *i == 6 {
+            yield *i;
         }
     }
 }
@@ -77,10 +81,10 @@ However, you can still achieve this behaviour and satisfy the compiler using the
 ```rust,no_run
 #[coroutine] || {
     let vals = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let res = None;
+    let mut res = None;
     for i in vals {
-        if i == 6 {
-            res = Some(i);
+        if *i == 6 {
+            res = Some(*i);
             break;
         }
     }
@@ -102,7 +106,10 @@ The router is responsible for routing data amongst a set of `Receiver` s in a Ro
 
 The filter is responsible for conditionally allowing data to flow through a `Reflux` pipeline. A predicate is supplied to a `Filter` and if data satisfies the predicate, it may pass through.
 
-Advice: Use a pure function as a predicate with a complexity of O(1), if at all possible. Functions with a higher complexity, or that read data from a file or socket have the potential to prevent the predicate from completing execution, either through an error or an infitite loop.
+### Guideline
+Use a pure function as a predicate with a complexity of O(1), if at all possible. Functions with a higher complexity, or that read data from a file or socket have the potential to prevent the predicate from completing execution, either through an error or an infitite loop.
+
+However, for use cases such as spam filters, it may be impossible to avoid using predicates that read from data sources, or with non-constant time complexities.
 
 ## Broadcast
 
@@ -118,7 +125,9 @@ The `Broadcast` is responsible for broadcasting data to multiple `Sender` s.
 
 The `Funnel` is responsible for collecting data from multiple `Receiver` s and sending the data through to a single `Sender`.
 
-Caution: The `Funnel` can potentially be a bottleneck in a `Reflux` pipeline, causing uncontrolled memory usage. It is advised to connect a small number of `Receiver`s to a `Funnel`.
+### Caution
+
+The `Funnel` can potentially be a bottleneck in a `Reflux` pipeline, causing uncontrolled memory usage. It is advised to connect a small number of `Receiver`s to a `Funnel`.
 
 ## Messenger
 
