@@ -1,5 +1,11 @@
 # Reflux
-Reflux is a cutting-edge Rust library designed to streamline the development of microservices with a focus on scalability, flexibility, and usability. By leveraging Rust's performance and safety features, Reflux empowers developers to build robust, high-performance microservices that can seamlessly adapt to evolving business needs. Whether you're scaling up to handle millions of requests or integrating diverse service components, Reflux provides the tools and framework you need to achieve efficient and maintainable microservice architectures. Dive into Reflux and transform the way you build and manage microservices with ease and confidence.
+Reflux is a cutting-edge Rust framework designed to streamline the development of microservices with a focus on scalability, flexibility, and usability. By leveraging Rust's performance and safety features, Reflux empowers developers to build robust, high-performance microservices that can seamlessly adapt to evolving business needs. Whether you're scaling up to handle millions of requests or integrating diverse service components, Reflux provides the tools and framework you need to achieve efficient and maintainable microservice architectures. Dive into Reflux and transform the way you build and manage microservices with ease and confidence.
+
+# Benefits of using Reflux
+- Single Responsibility - Write code that does one thing and does it well. Write simpler and more efficient code.
+- Isolation - The code you write is agnostic to the wider Reflux nextwork. Write extendible and flexible programs.
+- Scalability - Seamlessly scale your application to meet your requirements. Write adaptable code that scales on-demand.
+- Safety - Take full advantages of Rust's memory safety guarantees, ensuring you write and deploy reliable code.
 
 # Use cases
 - Pipeline workflows - Reflux is perfect for use cases such as ETL (Extract, Transform and Load) applications, image processing and real-time analytics.
@@ -46,7 +52,7 @@ This method is useful if you are reading from a data source one time, such as re
  ![Transformer](https://github.com/user-attachments/assets/74206a56-4f70-4abe-8a89-3e66060d0c4a)
 
  
- The transformer is responsible for mutating data. A transformer can convert data from one type to another, or mutate data, but keep the type.
+ The `Transformer` is responsible for mutating data. A transformer can convert data from one type to another, or mutate data, but keep the type.
 
  The transformer has three behaviours, represented by the following enum:
  ```rust,no_run
@@ -63,7 +69,7 @@ enum TransformerResult<O, T, E> {
 Note: As of version 1.2.0, the `Transformer` error handler simply prints the error to `stderr`.
 
 ### Guideline
-There may be instances when you may want to yield data as you are iterating through an iterable. If you are yielding in the for loop, the compiler will complain about borrowing issues.
+There may be instances when you may want to yield data as you are iterating through an iterable. If you are yielding in the for loop, the borrow checker will prevent compilation.
 
 For example, the following code snippet will not compile:
 ```rust,no_run
@@ -77,7 +83,7 @@ For example, the following code snippet will not compile:
 }
 ```
 
-However, you can still achieve this behaviour and satisfy the compiler using the following technique:
+However, you can still achieve this behaviour and satisfy the borrow checker using the following technique:
 ```rust,no_run
 #[coroutine] || {
     let vals = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -92,19 +98,20 @@ However, you can still achieve this behaviour and satisfy the compiler using the
 }
 ```
 
-## Router
+## Balancer
+
 
 ![Router](https://github.com/user-attachments/assets/f6e3b881-1e2d-4919-b95b-aea6c581d772)
 
 
-The router is responsible for routing data amongst a set of `Receiver` s in a Round Robin fasion.
+The `Balancer` is responsible for routing data amongst a set of `Receiver` s in a Round Robin fasion.
 
 ## Filter
 
 ![Filter](https://github.com/user-attachments/assets/df3d67d6-6bad-46d9-a506-b19eb0eed322)
 
 
-The filter is responsible for conditionally allowing data to flow through a `Reflux` pipeline. A predicate is supplied to a `Filter` and if data satisfies the predicate, it may pass through.
+The `Filter` is responsible for conditionally allowing data to flow through a `Reflux` pipeline. A predicate is supplied to a `Filter` and if data satisfies the predicate, it may pass through.
 
 ### Guideline
 Use a pure function as a predicate with a complexity of O(1), if at all possible. Functions with a higher complexity, or that read data from a file or socket have the potential to prevent the predicate from completing execution, either through an error or an infitite loop.
@@ -116,7 +123,7 @@ However, for use cases such as spam filters, it may be impossible to avoid using
 ![Broadcast](https://github.com/user-attachments/assets/0c2a4395-4656-40cb-b70c-77b55df1158a)
 
 
-The `Broadcast` is responsible for broadcasting data to multiple `Sender` s.
+The `Broadcast` is responsible for broadcasting data to multiple `Sender`s.
 
 ## Funnel
 
@@ -143,5 +150,14 @@ The `Messenger` is responsible for receiving messages and passing it through to 
 
 The `Loader` is the end of a `Reflux` pipeline. A loader can drop data, or write it to an external source (such as a file or socket).
 
-## Note: 
-Reflux is currently unstable, and is subject to change in future releases
+# Stability
+Due to coroutines being an unstable feature in Rust, and the evolving development of Reflux, the framework is currently unstable and is subject to change in the future.
+
+# Clogging and Thrashing
+- Clogging - Clogging is a behaviour whereby a node in a Rust pipeline crashes, but the channels between the node and it's connected neighbor is still active. The channels are written to, but never read from, so the channels start consuming memory. This may result in OOMKilled signals from the kernel, as the program has consumed all available memory.
+- Thrashing - Thrasing is the behaviour whereby too many nodes are instantiated, resulting in more CPU time context switching, rather than executing code. Note: The threshold of when this behaviour happens is unknown.
+
+# Wishlist
+- Detecting and handling clogging.
+- Minimise boilerplate code.
+- Implement a runtime, allowing for running multiple coroutines on a single thread.
