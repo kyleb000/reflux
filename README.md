@@ -1,14 +1,14 @@
 # Reflux
 Reflux is a cutting-edge Rust library designed to streamline the development of microservices with a focus on scalability, flexibility, and usability. By leveraging Rust's performance and safety features, Reflux empowers developers to build robust, high-performance microservices that can seamlessly adapt to evolving business needs. Whether you're scaling up to handle millions of requests or integrating diverse service components, Reflux provides the tools and framework you need to achieve efficient and maintainable microservice architectures. Dive into Reflux and transform the way you build and manage microservices with ease and confidence.
 
-# When not to use Reflux
-- I/O bound applications. Reflux is designed for CPU-bound applications, where many tasks are run simultaneously. If your use case is I/O focused, it is recommended to use a runtime such as [Tokio](https://tokio.rs/).
-- Web servers. Reflux is best served for applications where the data flows in one direction (i.e extraction, transformation, and loading). Whilst it is possible to build a web server with Reflux, the implementaion will be clunky.
-
 # Use cases
-- Pipeline workflows
-- Routing
-- Load balancing
+- Pipeline workflows - Reflux is perfect for use cases such as ETL (Extract, Transform and Load) applications, image processing and real-time analytics.
+- Routing - Leverage the flexibility of Reflux to build routing applications, such as reverse proxies, with safety and simplicity.
+- Load balancing - Data can be distributed amongst multiple endpoints, allowing for scaling of applications.
+
+# When not to use Reflux
+- I/O bound applications. Reflux is designed for CPU-bound applications, where many tasks are run simultaneously. If your use case is I/O focused, it is recommended to use a runtime such as [Tokio](https://tokio.rs/). However, you can use the two simultaneously - leverage the CPU-bound tasks to Reflux and the IO-bound tasks to Tokio!
+- Web servers. Reflux is best served for applications where the data flows in one direction (i.e extraction, transformation, and loading). Whilst it is possible to build a web server with Reflux, the implementaion will be clunky.
 
 # Reflux Objects
 In Reflux, there are various object types that are available.
