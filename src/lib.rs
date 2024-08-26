@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::{JoinHandle, sleep};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 
@@ -598,12 +598,14 @@ pub struct Accumulator<D> {
 
 impl<D> Accumulator<D>
 where D: Send + 'static {
-    pub fn new(max_size: usize, pause_sig: Option<Arc<AtomicBool>>, stop_sig: Arc<AtomicBool>, source: Receiver<D>) -> (Self, Receiver<Vec<D>>) {
+    pub fn new(max_wait: u64, pause_sig: Option<Arc<AtomicBool>>, stop_sig: Arc<AtomicBool>, source: Receiver<D>) -> (Self, Receiver<Vec<D>>) {
         let (a_tx, a_rx) = unbounded();
 
         let accumulator = thread::spawn(move || {
-            let mut tick: usize = 0;
             let mut accumulate_data = Cell::new(Vec::new());
+
+            let now = Instant::now();
+            let future = now + Duration::from_millis(max_wait);
 
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(ref pause) = pause_sig {
@@ -613,23 +615,15 @@ where D: Send + 'static {
                     }
                 }
 
-                let get_data = |tick: usize| {
-                    match tick {
-                        n if n < max_size => Some(source.recv_timeout(Duration::from_millis(50))),
-                        _ => None
+                while Instant::now() < future {
+                    if let Ok(data) = source.recv_timeout(Duration::from_millis(50)) {
+                        accumulate_data.get_mut().push(data);
                     }
-                };
-
-                while let Some(Ok(data)) = get_data(tick) {
-                    accumulate_data.get_mut().push(data);
-                    tick += 1;
                 }
 
                 if !accumulate_data.get_mut().is_empty() {
                     a_tx.send(accumulate_data.take()).unwrap();
                 }
-
-                tick = 0;
             }
         });
         (
@@ -1167,7 +1161,7 @@ mod tests {
 
         let (src_tx, src_rx) = unbounded();
 
-        let (accumulator, accumulate_chan) = Accumulator::new(100, None, stop_flag.clone(), src_rx);
+        let (accumulator, accumulate_chan) = Accumulator::new(1000, None, stop_flag.clone(), src_rx);
 
         src_tx.send("hello").unwrap();
         src_tx.send("there").unwrap();
