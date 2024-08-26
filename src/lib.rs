@@ -598,11 +598,11 @@ pub struct Accumulator<D> {
 
 impl<D> Accumulator<D>
 where D: Send + 'static {
-    pub fn new(pause_sig: Option<Arc<AtomicBool>>, stop_sig: Arc<AtomicBool>, source: Receiver<D>) -> (Self, Receiver<Vec<D>>) {
+    pub fn new(max_size: usize, pause_sig: Option<Arc<AtomicBool>>, stop_sig: Arc<AtomicBool>, source: Receiver<D>) -> (Self, Receiver<Vec<D>>) {
         let (a_tx, a_rx) = unbounded();
 
         let accumulator = thread::spawn(move || {
-            let mut tick = 0;
+            let mut tick: usize = 0;
             let mut accumulate_data = Cell::new(Vec::new());
 
             while !stop_sig.load(Ordering::Relaxed) {
@@ -613,9 +613,9 @@ where D: Send + 'static {
                     }
                 }
 
-                let get_data = |tick: i32| {
+                let get_data = |tick: usize| {
                     match tick {
-                        n if n < 100 => Some(source.recv_timeout(Duration::from_millis(50))),
+                        n if n < max_size => Some(source.recv_timeout(Duration::from_millis(50))),
                         _ => None
                     }
                 };
@@ -1167,7 +1167,7 @@ mod tests {
 
         let (src_tx, src_rx) = unbounded();
 
-        let (accumulator, accumulate_chan) = Accumulator::new(None, stop_flag.clone(), src_rx);
+        let (accumulator, accumulate_chan) = Accumulator::new(100, None, stop_flag.clone(), src_rx);
 
         src_tx.send("hello").unwrap();
         src_tx.send("there").unwrap();
