@@ -1,7 +1,10 @@
 #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 #![feature(unboxed_closures)]
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt::Display;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
 use std::pin::Pin;
@@ -90,7 +93,7 @@ impl Extractor {
                         continue
                     }
                 }
-                
+
                 let mut routine = extract_fn();
                 loop {
                     match Pin::new(&mut routine).resume(init_data.clone()) {
@@ -99,21 +102,20 @@ impl Extractor {
                             let _= tx.send(r);
                         }
                         _ => break
-                    } 
+                    }
                 }
             }
-        });        
+        });
         let s = Self {
             extract_fn: inlet_thr,
         };
 
         (s, rx)
     }
-    
+
     /// Waits for the `Extractor` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self.extract_fn.join()?;
-        Ok(())
+        self.extract_fn.join()
     }
 }
 
@@ -319,8 +321,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
 
     /// Waits for the `Broadcast` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self._broadcaster.join()?;
-        Ok(())
+        self._broadcaster.join()
     }
 }
 
@@ -426,10 +427,63 @@ impl <T> Router<T> where T: Send + 'static {
 
     /// Waits for the `Router` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self._dispatcher.join()?;
-        Ok(())
+        self._dispatcher.join()
     }
 }
+
+pub struct Message<ID, M> where M: 'static + Send, ID: Hash + Eq {
+    pub id: ID,
+    pub message: M
+}
+
+
+pub struct Messenger<ID, S> where ID: Hash + Eq + Send + 'static, S : 'static + Send {
+    subscribers: Arc<Mutex<HashMap<ID, Sender<S>>>>,
+    worker: JoinHandle<()>,
+}
+
+
+impl <ID, S> Messenger<ID, S>  where ID: Eq + Hash + Send + 'static, S: 'static + Send {
+    pub fn new(pause_sig: Option<Arc<AtomicBool>>,
+               stop_sig: Arc<AtomicBool>) -> (Self, Sender<Message<ID, S>>) {
+        let (tx, rx ) = unbounded::<Message<ID, S>>();
+        let subscribers = Arc::new(Mutex::new(HashMap::<ID, Sender<S>>::new()));
+        let thr_subscribers = subscribers.clone();
+        let worker = thread::spawn(move || {
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
+                if let Ok(msg) = rx.recv_timeout(Duration::from_millis(10)) {
+                    let subs = thr_subscribers.lock().unwrap();
+                    if let Some(sub) = subs.get(&msg.id) {
+                        let _ = sub.send(msg.message);
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                worker,
+                subscribers
+            },
+            tx
+        )
+    }
+
+    pub fn subscribe(&mut self, id: ID, subscriber: Sender<S>) {
+        let mut subscribers_lock = self.subscribers.lock().unwrap();
+        subscribers_lock.insert(id, subscriber);
+    }
+
+    pub fn join(self) -> thread::Result<()> {
+        self.worker.join()
+    }
+}
+
 
 /// An object that receives data from multiple subscriber and channels the data to a single output.
 /// 
@@ -532,12 +586,68 @@ where D: Send + 'static {
 
     /// Waits for the `Funnel` object to finish execution
     pub fn join(self) -> thread::Result<()> {
-        self._funnel_fn.join()?;
-        Ok(())
+        self._funnel_fn.join()
     }
 }
 
 
+pub struct Accumulator<D> {
+    _funnel_fn: JoinHandle<()>,
+    __phantom_data: PhantomData<D>
+}
+
+impl<D> Accumulator<D>
+where D: Send + 'static {
+    pub fn new(pause_sig: Option<Arc<AtomicBool>>, stop_sig: Arc<AtomicBool>, source: Receiver<D>) -> (Self, Receiver<Vec<D>>) {
+        let (a_tx, a_rx) = unbounded();
+
+        let accumulator = thread::spawn(move || {
+            let mut tick = 0;
+            let mut accumulate_data = Cell::new(Vec::new());
+
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(ref pause) = pause_sig {
+                    if pause.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
+
+                let get_data = |tick: i32| {
+                    match tick {
+                        n if n < 100 => Some(source.recv_timeout(Duration::from_millis(50))),
+                        _ => None
+                    }
+                };
+
+                while let Some(Ok(data)) = get_data(tick) {
+                    accumulate_data.get_mut().push(data);
+                    tick += 1;
+                }
+
+                if !accumulate_data.get_mut().is_empty() {
+                    a_tx.send(accumulate_data.take()).unwrap();
+                }
+
+                tick = 0;
+            }
+        });
+        (
+            Self {
+                _funnel_fn: accumulator,
+                __phantom_data: Default::default(),
+            },
+            a_rx
+        )
+    }
+
+    pub fn join(self) -> thread::Result<()> {
+        self._funnel_fn.join()
+    }
+}
+
+
+#[derive(Copy, Clone)]
 pub struct TransformerContext<D, G> {
     pub globals: G,
     pub data: Option<D>
@@ -640,30 +750,36 @@ impl<I, O, E> Transformer<I, O, E> {
                     }
                 }
                 let mut routine = transform_fn();
+                let mut is_running = false;
                 loop {
                     let in_data = match in_rx.recv_timeout(Duration::from_millis(10)) {
-                        Ok(val) => val,
-                        Err(_) => break
+                        Ok(val) => Some(val),
+                        Err(_) => {
+                            if !is_running {
+                                break
+                            } else {
+                                None
+                            }
+                        }
                     };
                     let coro_context = TransformerContext {
                         globals: new_ctx.clone(),
-                        data: Some(in_data)
+                        data: in_data
                     };
 
                     match Pin::new(&mut routine).resume(coro_context) {
                         CoroutineState::Yielded(res) => {
+                            is_running = true;
                             let r: TransformerResult<I, O, E> = res.into();
                             match r {
                                 TransformerResult::Transformed(val) => {
                                     out_tx.send(val).unwrap();
-                                    break
                                 }
                                 TransformerResult::NeedsMoreWork(val) => {
                                     tx2.send(val).unwrap()
                                 }
                                 TransformerResult::Error(val) => {
                                     eprintln!("{val}");
-                                    break
                                 }
                             }
                         }
@@ -686,8 +802,7 @@ impl<I, O, E> Transformer<I, O, E> {
 
     /// Waits for the `Transformer` object to finish execution
     pub fn join(self) -> thread::Result<()> {
-        self._run_thr.join()?;
-        Ok(())
+        self._run_thr.join()
     }
 }
 
@@ -782,8 +897,7 @@ impl Filter {
 
     /// Waits for the `Filter` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self._filter_thr.join()?;
-        Ok(())
+        self._filter_thr.join()
     }
 }
 
@@ -803,7 +917,7 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
     use super::*;
-    
+
     #[test]
     fn extractor_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -811,8 +925,7 @@ mod tests {
             add_routine!(#[coroutine] |_: ()| {
                 yield "Hello, world".to_string()
             }), stop_flag.clone(), None, ());
-        
-        
+
         let data = inlet_chan.recv().unwrap();
         stop_flag.store(true, Ordering::Relaxed);
         extractor.join().unwrap();
@@ -836,11 +949,11 @@ mod tests {
 
         assert_eq!(data_recv, "Hello, world".to_string())
     }
-    
+
     #[test]
     fn broadcast_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
-        
+
         let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
             sleep(Duration::from_secs(1));
             yield "hello".to_string()
@@ -848,7 +961,7 @@ mod tests {
 
         let (test_outlet1_sink, test_outlet1_source) = unbounded();
         let (test_outlet2_sink, test_outlet2_source) = unbounded();
-        
+
         let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
             test_outlet1_sink.send(format!("1: {example}")).unwrap()
         }, None, stop_flag.clone());
@@ -856,14 +969,14 @@ mod tests {
         let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
             test_outlet2_sink.send(format!("2: {example}")).unwrap()
         }, None, stop_flag.clone());
-        
+
         let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone());
         broadcaster.subscribe(test1_tx);
         broadcaster.subscribe(test2_tx);
-        
+
         let chan1 = broadcaster.channel();
         let chan2 = broadcaster.channel();
-        
+
         let data1 = test_outlet1_source.recv().unwrap();
         let data2 = test_outlet2_source.recv().unwrap();
         let data3 = chan1.recv().unwrap();
@@ -875,8 +988,7 @@ mod tests {
         test_outlet2.join().unwrap();
         test_inlet.0.join().unwrap();
         broadcaster.join().unwrap();
-        
-        
+
         assert_eq!(data1, "1: hello".to_string());
         assert_eq!(data2, "2: hello".to_string());
         assert_eq!(data3, "hello".to_string());
@@ -886,27 +998,27 @@ mod tests {
     #[test]
     fn router_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
-        
+
         let (tx, rx) = unbounded();
-        
+
         let mut router= Router::new(rx, None, stop_flag.clone());
-        
+
         let (in1, out1) = unbounded();
         let (in2, out2) = unbounded();
-        
+
         router.subscribe(in1);
         router.subscribe(in2);
-        
+
         tx.send("hello".to_string()).unwrap();
         tx.send("there".to_string()).unwrap();
         tx.send("beautiful".to_string()).unwrap();
         tx.send("world".to_string()).unwrap();
-        
+
         let out1_res = out1.recv().unwrap();
         let out2_res = out2.recv().unwrap();
         let out3_res = out1.recv().unwrap();
         let out4_res = out2.recv().unwrap();
-        
+
         assert_eq!(out1_res, "hello".to_string());
         assert_eq!(out2_res, "there".to_string());
         assert_eq!(out3_res, "beautiful".to_string());
@@ -938,7 +1050,7 @@ mod tests {
         let data = filter_sink.recv().unwrap();
 
         assert_eq!(data, "hello there");
-        
+
         stop_flag.store(true, Ordering::Relaxed);
         filter.join().unwrap()
     }
@@ -955,54 +1067,117 @@ mod tests {
         };
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-
-        let (transformer, input, output): (Transformer<i32, String, String>, Sender<i32>, Receiver<String>) = Transformer::new(
-            add_routine!(#[coroutine] |input: TransformerContext<i32, InnerContext>| {
-                let mut data = input.data.unwrap();
-                while data < 5 {
-                    data += input.globals.inc_val;
-                    yield TransformerResult::NeedsMoreWork(data);
+        let (transformer, input, output): (Transformer<Vec<i32>, i32, String>, Sender<Vec<i32>>, Receiver<i32>) = Transformer::new(
+            add_routine!(#[coroutine] |input: TransformerContext<Vec<i32>, InnerContext>| {
+                let value = input.data.unwrap();
+                let inc = input.globals.inc_val;
+                for x in value {
+                    yield TransformerResult::Transformed(x + inc);
                 }
-                yield TransformerResult::Transformed(format!("The number is {data}"));
             }), None, stop_flag.clone(), ctx);
 
-        input.send(0).unwrap();
+        input.send(vec![1, 3, 5, 7, 9, 11]).unwrap();
 
-        let result = output.recv().unwrap();
+        let mut result = 0;
+
+        while let Ok(val) = output.recv_timeout(Duration::from_millis(50)) {
+            result += val;
+        }
+
         stop_flag.store(true, Ordering::Relaxed);
         transformer.join().unwrap();
 
-        assert_eq!(result, "The number is 5".to_string())
+        assert_eq!(result, 42)
     }
     
     #[test]
     fn funnel_works() {
         let stop_flag = Arc::new(AtomicBool::new(false));
-        
+
         let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone());
-        
+
         let (rx1, tx1) = unbounded();
         let (rx2, tx2) = unbounded();
         let (rx3, tx3) = unbounded();
-        
+
         funnel.add_source(tx1);
         funnel.add_source(tx2);
         funnel.add_source(tx3);
-        
+
         rx1.send("hello".to_string()).unwrap();
         rx2.send("beautiful".to_string()).unwrap();
         rx3.send("world".to_string()).unwrap();
-        
+
         let str1 = funnel_out.recv().unwrap();
         let str2 = funnel_out.recv().unwrap();
         let str3 = funnel_out.recv().unwrap();
-        
+
         assert_eq!(str1, "hello");
         assert_eq!(str2, "beautiful");
         assert_eq!(str3, "world");
-        
+
         stop_flag.store(true, Ordering::Relaxed);
-        
+
         funnel.join().unwrap()
+    }
+    
+    #[test]
+    fn messenger_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (mut messenger, messenger_sender) = Messenger::new(None, stop_flag.clone());
+
+        let (tx1, rx1) = unbounded();
+        let (tx2, rx2) = unbounded();
+        let (tx3, rx3) = unbounded();
+
+        messenger.subscribe("hello", tx1);
+        messenger.subscribe("beautiful", tx3);
+        messenger.subscribe("world", tx2);
+
+        messenger_sender.send(Message{
+            id: "beautiful",
+            message: 330
+        }).unwrap();
+
+        messenger_sender.send(Message{
+            id: "world",
+            message: 5
+        }).unwrap();
+
+        messenger_sender.send(Message{
+            id: "hello",
+            message: 66
+        }).unwrap();
+ 
+        let res1 = rx1.recv().unwrap();
+        let res2 = rx2.recv().unwrap();
+        let res3 = rx3.recv().unwrap();
+
+        assert_eq!(res1, 66);
+        assert_eq!(res2, 5);
+        assert_eq!(res3, 330);
+
+        stop_flag.store(true, Ordering::Relaxed);
+        messenger.join().unwrap()
+    }
+
+    #[test]
+    fn accumulator_works() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let (src_tx, src_rx) = unbounded();
+
+        let (accumulator, accumulate_chan) = Accumulator::new(None, stop_flag.clone(), src_rx);
+
+        src_tx.send("hello").unwrap();
+        src_tx.send("there").unwrap();
+        src_tx.send("world").unwrap();
+
+        let result = accumulate_chan.recv().unwrap();
+
+        assert_eq!(result, vec!["hello", "there", "world"]);
+
+        stop_flag.store(true, Ordering::Relaxed);
+        accumulator.join().unwrap()
     }
 }
