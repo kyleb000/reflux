@@ -604,9 +604,6 @@ where D: Send + 'static {
         let accumulator = thread::spawn(move || {
             let mut accumulate_data = Cell::new(Vec::new());
 
-            let now = Instant::now();
-            let future = now + Duration::from_millis(max_wait);
-
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(ref pause) = pause_sig {
                     if pause.load(Ordering::Relaxed) {
@@ -614,6 +611,9 @@ where D: Send + 'static {
                         continue
                     }
                 }
+
+                let now = Instant::now();
+                let future = now + Duration::from_millis(max_wait);
 
                 while Instant::now() < future {
                     if let Ok(data) = source.recv_timeout(Duration::from_millis(50)) {
