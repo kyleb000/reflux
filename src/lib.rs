@@ -25,6 +25,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 #[derive(Debug, Copy, Clone)]
 pub enum TransformerResult<O, T, E> {
     Transformed(T),
+    Completed(Option<T>),
     NeedsMoreWork(O),
     Error(E),
 }
@@ -641,7 +642,7 @@ where D: Send + 'static {
 }
 
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct TransformerContext<D, G> {
     pub globals: G,
     pub data: Option<D>
@@ -661,7 +662,8 @@ pub struct TransformerContext<D, G> {
 ///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
 ///  use reflux::{Transformer, TransformerContext, TransformerResult};
-///  use std::sync::Arc;
+///  use std::sync::{Arc, Mutex};
+///  use std::cell::Cell;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::{Receiver, Sender};
 ///  use reflux::add_routine;
@@ -669,7 +671,7 @@ pub struct TransformerContext<D, G> {
 ///  use std::time::Duration;
 ///  use std::thread::sleep;
 /// 
-///  #[derive(Clone)]
+///  #[derive(Clone, Default)]
 ///  struct InnerContext {
 ///     inc_val: i32
 ///  }
@@ -681,13 +683,17 @@ pub struct TransformerContext<D, G> {
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///
 ///  let (transformer, input, output): (Transformer<i32, String, String>, Sender<i32>, Receiver<String>) = Transformer::new(
-///     add_routine!(#[coroutine] |input: TransformerContext<i32, InnerContext>| {
-///         let mut data = input.data.unwrap();
+///     add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<i32, InnerContext>>>>| {
+///         let data_cell = {
+///             input.lock().unwrap().take()
+///         };
+///
+///         let mut data = data_cell.data.unwrap();
 ///         while data < 5 {
-///             data += input.globals.inc_val;
+///             data += data_cell.globals.inc_val;
 ///             yield TransformerResult::NeedsMoreWork(data);
 ///         }
-///     yield TransformerResult::Transformed(format!("The number is {data}"));
+///     yield TransformerResult::Completed(Some(format!("The number is {data}")));
 ///  }), None, stop_flag.clone(), ctx);
 ///
 ///  input.send(0).unwrap();
@@ -723,12 +729,12 @@ impl<I, O, E> Transformer<I, O, E> {
                           context: Ctx) -> (Self, Sender<I>, Receiver<O>)
     where
         F: Fn() -> C + Send + 'static,
-        C: Coroutine<TransformerContext<I, Ctx>> + Send + 'static + Unpin,
+        C: Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>> + Send + 'static + Unpin,
         Ctx: Send + 'static + Clone,
         I: Send + 'static,
         O: Send + 'static,
         E: Send + 'static + Display,
-        TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<TransformerContext<I, Ctx>>>::Yield>,
+        TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>>>::Yield>,
     {
         let (in_tx, in_rx) = unbounded();
         let (out_tx, out_rx) = unbounded();
@@ -756,28 +762,42 @@ impl<I, O, E> Transformer<I, O, E> {
                             }
                         }
                     };
-                    let coro_context = TransformerContext {
+                    let coro_context = Arc::new(Mutex::new(Cell::new(TransformerContext {
                         globals: new_ctx.clone(),
                         data: in_data
-                    };
+                    })));
 
-                    match Pin::new(&mut routine).resume(coro_context) {
-                        CoroutineState::Yielded(res) => {
-                            is_running = true;
-                            let r: TransformerResult<I, O, E> = res.into();
-                            match r {
-                                TransformerResult::Transformed(val) => {
-                                    out_tx.send(val).unwrap();
+                    loop {
+                        let loop_context = coro_context.clone();
+                        match Pin::new(&mut routine).resume(loop_context) {
+                            CoroutineState::Yielded(res) => {
+                                is_running = true;
+                                let r: TransformerResult<I, O, E> = res.into();
+                                match r {
+                                    TransformerResult::Transformed(val) => {
+                                        out_tx.send(val).unwrap();
+                                    }
+                                    TransformerResult::Completed(val) => {
+                                        is_running = false;
+                                        if let Some(data) = val {
+                                            out_tx.send(data).unwrap();
+                                        }
+                                    }
+                                    TransformerResult::NeedsMoreWork(val) => {
+                                        tx2.send(val).unwrap()
+                                    }
+                                    TransformerResult::Error(val) => {
+                                        eprintln!("{val}");
+                                    }
                                 }
-                                TransformerResult::NeedsMoreWork(val) => {
-                                    tx2.send(val).unwrap()
-                                }
-                                TransformerResult::Error(val) => {
-                                    eprintln!("{val}");
+                                break
+                            }
+                            _ => {
+                                if is_running {
+                                    routine = transform_fn()
                                 }
                             }
                         }
-                        _ => break
                     }
                 }
             }
@@ -1051,7 +1071,7 @@ mod tests {
 
     #[test]
     fn transformer_works() {
-        #[derive(Clone)]
+        #[derive(Clone, Default)]
         struct InnerContext {
             inc_val: i32
         }
@@ -1062,12 +1082,18 @@ mod tests {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (transformer, input, output): (Transformer<Vec<i32>, i32, String>, Sender<Vec<i32>>, Receiver<i32>) = Transformer::new(
-            add_routine!(#[coroutine] |input: TransformerContext<Vec<i32>, InnerContext>| {
-                let value = input.data.unwrap();
-                let inc = input.globals.inc_val;
+            add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<Vec<i32>, InnerContext>>>>| {
+
+                let data = {
+                    input.lock().unwrap().take()
+                };
+
+                let value = data.data.unwrap();
+                let inc = data.globals.inc_val;
                 for x in value {
                     yield TransformerResult::Transformed(x + inc);
                 }
+                yield TransformerResult::Completed(None)
             }), None, stop_flag.clone(), ctx);
 
         input.send(vec![1, 3, 5, 7, 9, 11]).unwrap();
@@ -1173,5 +1199,49 @@ mod tests {
 
         stop_flag.store(true, Ordering::Relaxed);
         accumulator.join().unwrap()
+    }
+
+    #[test]
+    fn transformer_01_works() {
+        #[derive(Clone, Default)]
+        struct InnerContext {
+            inc_val: i32
+        }
+
+        let ctx = InnerContext {
+            inc_val: 1
+        };
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (transformer, input, output): (Transformer<i32, i32, String>, Sender<i32>, Receiver<i32>) = Transformer::new(
+            add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<i32, InnerContext>>>>| {
+
+                let data = {
+                    input.lock().unwrap().take()
+                };
+
+                let value = data.data.unwrap();
+                let inc = data.globals.inc_val;
+
+                if value < 42 {
+                    yield TransformerResult::NeedsMoreWork(value + inc)
+                } else {
+                    yield TransformerResult::Completed(Some(value))
+                }
+
+            }), None, stop_flag.clone(), ctx);
+
+        input.send(0).unwrap();
+
+        let mut result = 0;
+
+        while let Ok(val) = output.recv_timeout(Duration::from_millis(50)) {
+            result += val;
+        }
+
+        stop_flag.store(true, Ordering::Relaxed);
+        transformer.join().unwrap();
+
+        assert_eq!(result, 42)
     }
 }
