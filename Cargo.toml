@@ -1,6 +1,6 @@
 [package]
 name = "reflux"
-version = "1.2.5"
+version = "1.2.6"
 edition = "2021"
 license = "LGPL-3.0-only"
 homepage = "https://github.com/kyleb000/reflux/wiki"
@@ -12,4 +12,4 @@ readme = "README.md"
 
 [dependencies]
 crossbeam-channel = "0.5.13"
-anyhow = "1.0.86"
+anyhow = "1.0.89"
