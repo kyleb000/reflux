@@ -1,6 +1,8 @@
 #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 #![feature(unboxed_closures)]
 
+mod util;
+
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
@@ -60,7 +62,7 @@ pub struct Inlet {
 }
 
 impl Inlet {
-    /// Creates a new `Inlet` object.
+    /// Creates a new `Inlet` object with an unbounded internal channel.
     /// 
     /// # Parameters
     /// - `inlet_fn` - A coroutine that reads and returns data from an external source.
@@ -75,7 +77,29 @@ impl Inlet {
             I: Send + 'static + Clone,
             C: Coroutine<I> + Send + 'static + Unpin,
             T: Send + 'static + From<<C as Coroutine<I>>::Yield> {
-        let (tx, rx) = unbounded();
+        Self::new_bounded(inlet_fn, stop_sig, init_data, None)
+    }
+
+    /// Creates a new `Inlet` object with a bounded internal channel.
+    ///
+    /// # Parameters
+    /// - `inlet_fn` - A coroutine that reads and returns data from an external source.
+    /// The use of the `add_routine!` macro is necessary when passing in an `inlet_fn`.
+    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    /// - `data_limit` - An optional parameter to limit channel capacity.
+    ///
+    /// # Returns
+    /// A `Inlet` object and a `Receiver` to receive data from the `inlet_fn`
+    pub fn new_bounded<F, C, T, I>(inlet_fn: F,
+                                   stop_sig: Arc<AtomicBool>,
+                                   init_data: I,
+                                   data_limit: Option<usize>) -> (Self, Receiver<T>)
+        where
+            F: Fn() -> C + Send + 'static,
+            I: Send + 'static + Clone,
+            C: Coroutine<I> + Send + 'static + Unpin,
+            T: Send + 'static + From<<C as Coroutine<I>>::Yield> {
+        let (tx, rx) = util::get_channel(data_limit);
         let inlet_thr = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 let mut routine = inlet_fn();
@@ -86,10 +110,10 @@ impl Inlet {
                             let _= tx.send(r);
                         }
                         _ => break
-                    } 
+                    }
                 }
             }
-        });        
+        });
         let s = Self {
             inlet_fn: inlet_thr,
         };
@@ -142,7 +166,7 @@ pub struct Outlet {
 }
 
 impl Outlet {
-    /// Creates a new `Outlet` object.
+    /// Creates a new `Outlet` object with an unbounded internal channel.
     ///
     /// # Parameters
     /// - `outlet_fn` - A function that receives data from a `Reflux` network and sends it to an
@@ -153,11 +177,35 @@ impl Outlet {
     /// # Returns
     /// - An `Outlet` object
     /// - A `Sender` to send data out to.
-    pub fn new<T, F>(mut outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
+    pub fn new<T, F>(outlet_fn: F, stop_sig: Arc<AtomicBool>) -> (Self, Sender<T>)
         where
             T: Send + 'static,
             F: FnMut(T) + Send + 'static {
-        let (sender, receiver) = unbounded();
+        Self::new_bounded(outlet_fn, stop_sig, None)
+    }
+    
+    /// Waits for the `Outlet` object to finish execution
+    pub fn join(self) -> thread::Result<()> {
+        self.outlet_fn.join()?;
+        Ok(())
+    }
+
+    /// Creates a new `Outlet` object, with a bounded internal channel.
+    ///
+    /// # Parameters
+    /// - `outlet_fn` - A function that receives data from a `Reflux` network and sends it to an
+    /// external sink.
+    /// - `receiver` - A `Receiver` channel object from which to receive data.
+    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    ///
+    /// # Returns
+    /// - An `Outlet` object
+    /// - A `Sender` to send data out to.
+    pub fn new_bounded<T, F>(mut outlet_fn: F, stop_sig: Arc<AtomicBool>, data_limit: Option<usize>) -> (Self, Sender<T>)
+    where
+        T: Send + 'static,
+        F: FnMut(T) + Send + 'static {
+        let (sender, receiver) = util::get_channel(data_limit);
         let outlet = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
@@ -168,12 +216,6 @@ impl Outlet {
         (Self {
             outlet_fn: outlet
         }, sender)
-    }
-    
-    /// Waits for the `Outlet` object to finish execution
-    pub fn join(self) -> thread::Result<()> {
-        self.outlet_fn.join()?;
-        Ok(())
     }
 }
 
@@ -275,12 +317,22 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
         subscribers_lock.push(subscriber)
     }
     
-    /// Create a subscription for an external object to use to receive data from the `Broadcast`
+    /// Create a subscription for an external object to use to receive data from the `Broadcast`.
+    /// Note: Subscription is based on an unbounded channel.
     /// 
     /// # Returns
     /// - A `Receiver` object from which to receive data.
     pub fn channel(&mut self) -> Receiver<T> {
-        let (tx, rx) = unbounded();
+        Self::channel_bounded(self, None)
+    }
+
+    /// Create a subscription for an external object to use to receive data from the `Broadcast`.
+    /// Note: Subscription is based on a bounded channel.
+    ///
+    /// # Returns
+    /// - A `Receiver` object from which to receive data.
+    pub fn channel_bounded(&mut self, data_limit: Option<usize>) -> Receiver<T> {
+        let (tx, rx) = util::get_channel(data_limit);
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(tx);
         rx
@@ -445,7 +497,7 @@ pub struct Funnel<D> {
 
 impl<D> Funnel<D> 
 where D: Send + 'static {
-    /// Creates a new `Funnel` object
+    /// Creates a new `Funnel` object with an unbounded internal channel.
     /// 
     /// # Parameters
     ///  - `stop_flag`: A flag to signal the termination of the `Funnel` instance.
@@ -454,9 +506,22 @@ where D: Send + 'static {
     ///  - A `Funnel` instance
     ///  - A `Receiver` channel for `Funnel` output
     pub fn new(stop_flag: Arc<AtomicBool>) -> (Self, Receiver<D>) {
+        Self::new_bounded(stop_flag, None)
+    }
+
+    /// Creates a new `Funnel` object with a bounded internal channel.
+    ///
+    /// # Parameters
+    ///  - `stop_flag`: A flag to signal the termination of the `Funnel` instance.
+    ///  - `data_limit`: An optional size to limit channel capacity.
+    ///
+    /// # Returns
+    ///  - A `Funnel` instance
+    ///  - A `Receiver` channel for `Funnel` output
+    pub fn new_bounded(stop_flag: Arc<AtomicBool>, data_limit: Option<usize>) -> (Self, Receiver<D>) {
         let receivers:Arc<Mutex<Vec<Receiver<D>>>> = Arc::new(Mutex::new(Vec::new()));
-        let (tx, rx) = unbounded();
-        
+        let (tx, rx) = util::get_channel(data_limit);
+
         let worker_receivers = receivers.clone();
         let funnel_worker = thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
@@ -555,7 +620,7 @@ pub struct Transformer<I, O, E> {
 }
 
 impl<I, O, E> Transformer<I, O, E> {
-    /// Creates a new `Transformer` object.
+    /// Creates a new `Transformer` object with an unbounded internal channel.
     ///
     /// # Parameters
     /// - `transform_fn` - A coroutine that will transform data.
@@ -575,8 +640,34 @@ impl<I, O, E> Transformer<I, O, E> {
         E: Send + 'static + Display,
         TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<TransformerContext<I, Ctx>>>::Yield>,
     {
-        let (in_tx, in_rx) = unbounded();
-        let (out_tx, out_rx) = unbounded();
+        Self::new_unbounded(transform_fn, stop_sig, context, None)
+    }
+
+    /// Creates a new `Transformer` object with a bounded internal channel.
+    ///
+    /// # Parameters
+    /// - `transform_fn` - A coroutine that will transform data.
+    ///     The use of the `add_routine!` macro is necessary when passing in a coroutine.
+    /// - `stop_sig` - A flag to signal the `Router` object to terminate
+    /// - `context` - An object of immutable values for the `transformer_fn` to use during computation
+    ///
+    /// # Returns
+    /// A `Transformer` object
+    pub fn new_unbounded<Ctx, F, C>(transform_fn: F,
+                                    stop_sig: Arc<AtomicBool>,
+                                    context: Ctx,
+                                    data_limit: Option<usize>) -> (Self, Sender<I>, Receiver<O>)
+    where
+        F: Fn() -> C + Send + 'static,
+        C: Coroutine<TransformerContext<I, Ctx>> + Send + 'static + Unpin,
+        Ctx: Send + 'static + Clone,
+        I: Send + 'static,
+        O: Send + 'static,
+        E: Send + 'static + Display,
+        TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<TransformerContext<I, Ctx>>>::Yield>,
+    {
+        let (in_tx, in_rx) = util::get_channel(data_limit);
+        let (out_tx, out_rx) = util::get_channel(data_limit);
 
         let tx2 = in_tx.clone();
         let new_ctx = context;
@@ -626,6 +717,8 @@ impl<I, O, E> Transformer<I, O, E> {
             out_rx
         )
     }
+    
+    
 
     /// Waits for the `Transformer` object to finish execution
     pub fn join(self) -> thread::Result<()> {
@@ -684,7 +777,7 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// Creates a new `Filter` object.
+    /// Creates a new `Filter` object with an unbounded internal channel.
     ///
     /// # Parameters
     /// - `filter` - A function that takes a reference, determines if the data meets some condition and returns a boolean.
@@ -698,7 +791,27 @@ impl Filter {
     where
         T: Send + 'static,
         F: Fn(&T) -> bool + Send + 'static {
-        let (sender, receiver) = unbounded();
+        Self::new_unbounded(filter_fn, source, stop_sig, None)
+    }
+
+    /// Creates a new `Filter` object with a bounded internal channel.
+    ///
+    /// # Parameters
+    /// - `filter` - A function that takes a reference, determines if the data meets some condition and returns a boolean.
+    /// - `source` - A `Receiver` channel object from which to receive data.
+    /// - `stop_sig` - A flag to signal the `Inlet` object to terminate
+    ///
+    /// # Returns
+    ///  - A `Filter` object
+    ///  - A `Receiver`
+    pub fn new_unbounded<T, F>(filter_fn: F,
+                               source: Receiver<T>, 
+                               stop_sig: Arc<AtomicBool>,
+                               data_limit: Option<usize>) -> (Self, Receiver<T>)
+    where
+        T: Send + 'static,
+        F: Fn(&T) -> bool + Send + 'static {
+        let (sender, receiver) = util::get_channel(data_limit);
         let filter = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
