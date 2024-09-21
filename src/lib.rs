@@ -297,7 +297,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     let subscribers_lock = thr_subscribers.lock().unwrap();
                     for subscriber in subscribers_lock.iter() {
-                        subscriber.send(data.clone()).unwrap();
+                        let _= subscriber.send(data.clone());
                     };           
                 }
             }
@@ -416,7 +416,7 @@ impl <T> Router<T> where T: Send + 'static {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     let subscribers_lock = thr_subscribers.lock().unwrap();
-                    subscribers_lock.get(pointer).unwrap().send(data).unwrap();
+                    let _= subscribers_lock.get(pointer).unwrap().send(data);
                     pointer = (pointer + 1) % subscribers_lock.len();
                 }
             }
@@ -527,7 +527,7 @@ where D: Send + 'static {
             while !stop_flag.load(Ordering::Relaxed) {
                 for receiver in worker_receivers.lock().unwrap().iter() {
                     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
-                        tx.send(data).unwrap()
+                        let _= tx.send(data);
                     }
                 }
             }
@@ -689,11 +689,11 @@ impl<I, O, E> Transformer<I, O, E> {
                             let r: TransformerResult<I, O, E> = res.into();
                             match r {
                                 TransformerResult::Transformed(val) => {
-                                    out_tx.send(val).unwrap();
+                                    let _= out_tx.send(val);
                                     break
                                 }
                                 TransformerResult::NeedsMoreWork(val) => {
-                                    tx2.send(val).unwrap()
+                                    let _= tx2.send(val);
                                 }
                                 TransformerResult::Error(val) => {
                                     eprintln!("{val}");
@@ -791,7 +791,7 @@ impl Filter {
     where
         T: Send + 'static,
         F: Fn(&T) -> bool + Send + 'static {
-        Self::new_unbounded(filter_fn, source, stop_sig, None)
+        Self::new_bounded(filter_fn, source, stop_sig, None)
     }
 
     /// Creates a new `Filter` object with a bounded internal channel.
@@ -804,7 +804,7 @@ impl Filter {
     /// # Returns
     ///  - A `Filter` object
     ///  - A `Receiver`
-    pub fn new_unbounded<T, F>(filter_fn: F,
+    pub fn new_bounded<T, F>(filter_fn: F,
                                source: Receiver<T>, 
                                stop_sig: Arc<AtomicBool>,
                                data_limit: Option<usize>) -> (Self, Receiver<T>)
@@ -816,7 +816,7 @@ impl Filter {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     if filter_fn(&data) {
-                        sender.send(data).unwrap()
+                        let _= sender.send(data);
                     }
                 }
             }
