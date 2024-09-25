@@ -640,7 +640,7 @@ impl<I, O, E> Transformer<I, O, E> {
         E: Send + 'static + Display,
         TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<TransformerContext<I, Ctx>>>::Yield>,
     {
-        Self::new_unbounded(transform_fn, stop_sig, context, None)
+        Self::new_bounded(transform_fn, stop_sig, context, None)
     }
 
     /// Creates a new `Transformer` object with a bounded internal channel.
@@ -653,7 +653,7 @@ impl<I, O, E> Transformer<I, O, E> {
     ///
     /// # Returns
     /// A `Transformer` object
-    pub fn new_unbounded<Ctx, F, C>(transform_fn: F,
+    pub fn new_bounded<Ctx, F, C>(transform_fn: F,
                                     stop_sig: Arc<AtomicBool>,
                                     context: Ctx,
                                     data_limit: Option<usize>) -> (Self, Sender<I>, Receiver<O>)
