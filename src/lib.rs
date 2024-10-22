@@ -758,7 +758,7 @@ impl<I, O, E> Transformer<I, O, E> {
         Ctx: Send + 'static + Clone,
         I: Send + 'static,
         O: Send + 'static,
-        E: Send + 'static + Display,
+        E: Send + 'static,
         TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>>>::Yield>,
     {
         let (in_tx, in_rx) = util::get_channel(data_limit);
@@ -813,7 +813,7 @@ impl<I, O, E> Transformer<I, O, E> {
                                         tx2.send(val).unwrap()
                                     }
                                     TransformerResult::Error(val) => {
-                                        err_tx.send(val).unwrap();
+                                        err_tx.send(val).unwrap()
                                     }
                                 }
                                 break
