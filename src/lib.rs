@@ -777,6 +777,7 @@ impl<I, O, E> Transformer<I, O, E> {
                 }
                 let mut routine = transform_fn();
                 let mut is_running = false;
+                let mut coro_completed = false;
                 loop {
                     let in_data = match in_rx.recv_timeout(Duration::from_millis(10)) {
                         Ok(val) => Some(val),
@@ -788,6 +789,12 @@ impl<I, O, E> Transformer<I, O, E> {
                             }
                         }
                     };
+                    
+                    if coro_completed {
+                        routine = transform_fn();
+                        coro_completed = false;
+                    }
+                    
                     let coro_context = Arc::new(Mutex::new(Cell::new(TransformerContext {
                         globals: new_ctx.clone(),
                         data: in_data
@@ -805,6 +812,7 @@ impl<I, O, E> Transformer<I, O, E> {
                                     }
                                     TransformerResult::Completed(val) => {
                                         is_running = false;
+                                        coro_completed = true;
                                         if let Some(data) = val {
                                             out_tx.send(data).unwrap();
                                         }
