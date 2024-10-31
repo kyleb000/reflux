@@ -794,7 +794,7 @@ impl<I, O, E> Transformer<I, O, E> {
                         routine = transform_fn();
                         coro_completed = false;
                     }
-                    
+
                     let coro_context = Arc::new(Mutex::new(Cell::new(TransformerContext {
                         globals: new_ctx.clone(),
                         data: in_data
@@ -821,6 +821,7 @@ impl<I, O, E> Transformer<I, O, E> {
                                         tx2.send(val).unwrap()
                                     }
                                     TransformerResult::Error(val) => {
+                                        coro_completed = true;
                                         err_tx.send(val).unwrap()
                                     }
                                 }
