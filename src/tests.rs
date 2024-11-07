@@ -151,7 +151,7 @@ fn transformer_works() {
     };
 
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let (transformer, input, output, _): (Transformer<Vec<i32>, i32, String>, Sender<Vec<i32>>, Receiver<i32>, Receiver<String>) = Transformer::new(
+    let (transformer, input, output, _, _): (Transformer<Vec<i32>, i32, String, ()>, Sender<Vec<i32>>, Receiver<i32>, Receiver<String>, Receiver<()>) = Transformer::new(
         add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<Vec<i32>, InnerContext>>>>| {
 
                 let data = {
@@ -283,7 +283,7 @@ fn transformer_01_works() {
     };
 
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let (transformer, input, output, _): (Transformer<i32, i32, String>, Sender<i32>, Receiver<i32>, Receiver<String>) = Transformer::new(
+    let (transformer, input, output, _, _): (Transformer<i32, i32, String, ()>, Sender<i32>, Receiver<i32>, Receiver<String>, Receiver<()>) = Transformer::new(
         add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<i32, InnerContext>>>>| {
 
                 let data = {

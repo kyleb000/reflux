@@ -28,11 +28,12 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 /// - `NeedsMoreWork` - Data has been processed, but is not ready to be sent through the network.
 /// - `Error` - An error occurred when processing data.
 #[derive(Debug, Copy, Clone)]
-pub enum TransformerResult<O, T, E> {
+pub enum TransformerResult<O, T, E, L> {
     Transformed(T),
     Completed(Option<T>),
     NeedsMoreWork(O),
     Error(E),
+    Log(L)
 }
 
 /// Receives data from an external source and sends the data through a channel.
@@ -706,7 +707,7 @@ pub struct TransformerContext<D, G> {
 ///
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///
-///  let (transformer, input, output, _): (Transformer<i32, String, String>, Sender<i32>, Receiver<String>, Receiver<String>) = Transformer::new(
+///  let (transformer, input, output, _, _): (Transformer<i32, String, String, ()>, Sender<i32>, Receiver<String>, Receiver<String>, Receiver<()>) = Transformer::new(
 ///     add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<i32, InnerContext>>>>| {
 ///         let data_cell = {
 ///             input.lock().unwrap().take()
@@ -728,14 +729,15 @@ pub struct TransformerContext<D, G> {
 ///
 ///  assert_eq!(result, "The number is 5".to_string())
 /// ```
-pub struct Transformer<I, O, E> {
+pub struct Transformer<I, O, E, L> {
     _run_thr: JoinHandle<()>,
     _i: PhantomData<I>,
     _o: PhantomData<O>,
     _e: PhantomData<E>,
+    _l: PhantomData<L>,
 }
 
-impl<I, O, E> Transformer<I, O, E> {
+impl<I, O, E, L> Transformer<I, O, E, L> {
     /// Creates a new `Transformer` object.
     ///
     /// # Parameters
@@ -751,7 +753,7 @@ impl<I, O, E> Transformer<I, O, E> {
                           pause_sig: Option<Arc<AtomicBool>>,
                           stop_sig: Arc<AtomicBool>,
                           context: Ctx,
-                          data_limit: Option<usize>) -> (Self, Sender<I>, Receiver<O>, Receiver<E>)
+                          data_limit: Option<usize>) -> (Self, Sender<I>, Receiver<O>, Receiver<E>, Receiver<L>)
     where
         F: Fn() -> C + Send + 'static,
         C: Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>> + Send + 'static + Unpin,
@@ -759,11 +761,13 @@ impl<I, O, E> Transformer<I, O, E> {
         I: Send + 'static,
         O: Send + 'static,
         E: Send + 'static,
-        TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>>>::Yield>,
+        L: Send + 'static,
+        TransformerResult<I, O, E, L>: Send + 'static + From<<C as Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>>>::Yield>,
     {
         let (in_tx, in_rx) = util::get_channel(data_limit);
         let (out_tx, out_rx) = util::get_channel(data_limit);
         let (err_tx, err_rx) = util::get_channel(data_limit);
+        let (log_tx, log_rx) = util::get_channel(data_limit);
 
         let tx2 = in_tx.clone();
         let new_ctx = context;
@@ -805,7 +809,7 @@ impl<I, O, E> Transformer<I, O, E> {
                         match Pin::new(&mut routine).resume(loop_context) {
                             CoroutineState::Yielded(res) => {
                                 is_running = true;
-                                let r: TransformerResult<I, O, E> = res.into();
+                                let r: TransformerResult<I, O, E, L> = res.into();
                                 match r {
                                     TransformerResult::Transformed(val) => {
                                         out_tx.send(val).unwrap();
@@ -823,6 +827,9 @@ impl<I, O, E> Transformer<I, O, E> {
                                     TransformerResult::Error(val) => {
                                         coro_completed = true;
                                         err_tx.send(val).unwrap()
+                                    }
+                                    TransformerResult::Log(val) => {
+                                        log_tx.send(val).unwrap()
                                     }
                                 }
                                 break
@@ -843,10 +850,12 @@ impl<I, O, E> Transformer<I, O, E> {
                 _i: Default::default(),
                 _o: Default::default(),
                 _e: Default::default(),
+                _l: Default::default(),
             },
             in_tx,
             out_rx,
-            err_rx
+            err_rx,
+            log_rx
         )
     }
 
