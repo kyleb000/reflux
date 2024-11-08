@@ -27,9 +27,10 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 /// - `Transformed` - Data has been mutated and can be sent along a `Reflux` network.
 /// - `NeedsMoreWork` - Data has been processed, but is not ready to be sent through the network.
 /// - `Error` - An error occurred when processing data.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum TransformerResult<O, T, E, L> {
     Transformed(T),
+    TransformedMulti(Vec<T>),
     Completed(Option<T>),
     NeedsMoreWork(O),
     Error(E),
@@ -813,6 +814,11 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                                 match r {
                                     TransformerResult::Transformed(val) => {
                                         out_tx.send(val).unwrap();
+                                    }
+                                    TransformerResult::TransformedMulti(val) => {
+                                        for item in val {
+                                            out_tx.send(item).unwrap();
+                                        }
                                     }
                                     TransformerResult::Completed(val) => {
                                         is_running = false;
