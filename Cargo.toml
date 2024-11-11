@@ -1,6 +1,6 @@
 [package]
 name = "reflux"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 license = "LGPL-3.0-only"
 homepage = "https://github.com/kyleb000/reflux/wiki"

@@ -32,9 +32,13 @@ pub enum TransformerResult<O, T, E, L> {
     Transformed(T),
     TransformedMulti(Vec<T>),
     Completed(Option<T>),
+    CompletedMulti(Option<Vec<T>>),
     NeedsMoreWork(O),
+    NeedsMoreWorkMulti(Vec<O>),
     Error(E),
-    Log(L)
+    ErrorMulti(Vec<E>),
+    Log(L),
+    LogMulti(Vec<L>),
 }
 
 /// Receives data from an external source and sends the data through a channel.
@@ -827,15 +831,40 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                                             out_tx.send(data).unwrap();
                                         }
                                     }
+                                    TransformerResult::CompletedMulti(val) => {
+                                        is_running = false;
+                                        coro_completed = true;
+                                        if let Some(data) = val {
+                                            for item in data {
+                                                out_tx.send(item).unwrap();
+                                            }
+                                        }
+                                    }
                                     TransformerResult::NeedsMoreWork(val) => {
                                         tx2.send(val).unwrap()
+                                    }
+                                    TransformerResult::NeedsMoreWorkMulti(val) => {
+                                        for item in val {
+                                            tx2.send(item).unwrap()
+                                        }
                                     }
                                     TransformerResult::Error(val) => {
                                         coro_completed = true;
                                         err_tx.send(val).unwrap()
                                     }
+                                    TransformerResult::ErrorMulti(val) => {
+                                        coro_completed = true;
+                                        for item in val {
+                                            err_tx.send(item).unwrap()
+                                        }
+                                    }
                                     TransformerResult::Log(val) => {
                                         log_tx.send(val).unwrap()
+                                    }
+                                    TransformerResult::LogMulti(val) => {
+                                        for item in val {
+                                            log_tx.send(item).unwrap()
+                                        }
                                     }
                                 }
                                 break
