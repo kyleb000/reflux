@@ -8,7 +8,7 @@ fn extractor_works() {
     let (extractor, inlet_chan): (Extractor, Receiver<String>) = Extractor::new(
         add_routine!(#[coroutine] |_: ()| {
                 yield "Hello, world".to_string()
-            }), stop_flag.clone(), None, (), None);
+            }), stop_flag.clone(), None, (), 0);
 
     let data = inlet_chan.recv().unwrap();
     stop_flag.store(true, Ordering::Relaxed);
@@ -20,10 +20,10 @@ fn extractor_works() {
 #[test]
 fn loader_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let (test_tx, test_rx) = unbounded();
+    let (test_tx, test_rx) = util::get_channel(0);
     let (loader, data_tx) = Loader::new(move |test: String| {
         test_tx.send(test).unwrap();
-    }, None, stop_flag.clone(), None);
+    }, None, stop_flag.clone(), 0);
 
     data_tx.send("Hello, world".to_string()).unwrap();
 
@@ -41,20 +41,20 @@ fn broadcast_works() {
     let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
             sleep(Duration::from_secs(1));
             yield "hello".to_string()
-        }), stop_flag.clone(), None, (), None);
+        }), stop_flag.clone(), None, (), 0);
 
-    let (test_outlet1_sink, test_outlet1_source) = unbounded();
-    let (test_outlet2_sink, test_outlet2_source) = unbounded();
+    let (test_outlet1_sink, test_outlet1_source) = util::get_channel(0);
+    let (test_outlet2_sink, test_outlet2_source) = util::get_channel(0);
 
     let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
         test_outlet1_sink.send(format!("1: {example}")).unwrap()
-    }, None, stop_flag.clone(), None);
+    }, None, stop_flag.clone(), 0);
 
     let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
         test_outlet2_sink.send(format!("2: {example}")).unwrap()
-    }, None, stop_flag.clone(), None);
+    }, None, stop_flag.clone(), 0);
 
-    let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone(), None);
+    let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone(), 0);
     broadcaster.subscribe(test1_tx);
     broadcaster.subscribe(test2_tx);
 
@@ -83,12 +83,12 @@ fn broadcast_works() {
 fn router_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let (tx, rx) = unbounded();
+    let (tx, rx) = util::get_channel(0);
 
     let mut router= Router::new(rx, None, stop_flag.clone());
 
-    let (in1, out1) = unbounded();
-    let (in2, out2) = unbounded();
+    let (in1, out1) = util::get_channel(0);
+    let (in2, out2) = util::get_channel(0);
 
     router.subscribe(in1);
     router.subscribe(in2);
@@ -117,9 +117,9 @@ fn filter_works() {
 
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let (tx, rx) = unbounded();
+    let (tx, rx) = util::get_channel(0);
 
-    let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), None);
+    let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), 0);
 
     tx.send("hello world".to_string()).unwrap();
     let data = filter_sink.recv().unwrap();
@@ -164,7 +164,7 @@ fn transformer_works() {
                     yield TransformerResult::Transformed(x + inc);
                 }
                 yield TransformerResult::Completed(None)
-            }), None, stop_flag.clone(), ctx, None);
+            }), None, stop_flag.clone(), ctx, 0);
 
     input.send(vec![1, 3, 5, 7, 9, 11]).unwrap();
 
@@ -184,11 +184,11 @@ fn transformer_works() {
 fn funnel_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone(), None);
+    let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone(), 0);
 
-    let (rx1, tx1) = unbounded();
-    let (rx2, tx2) = unbounded();
-    let (rx3, tx3) = unbounded();
+    let (rx1, tx1) = util::get_channel(0);
+    let (rx2, tx2) = util::get_channel(0);
+    let (rx3, tx3) = util::get_channel(0);
 
     funnel.add_source(tx1);
     funnel.add_source(tx2);
@@ -214,11 +214,11 @@ fn funnel_works() {
 #[test]
 fn messenger_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let (mut messenger, messenger_sender) = Messenger::new(None, stop_flag.clone(), None);
+    let (mut messenger, messenger_sender) = Messenger::new(None, stop_flag.clone(), 0);
 
-    let (tx1, rx1) = unbounded();
-    let (tx2, rx2) = unbounded();
-    let (tx3, rx3) = unbounded();
+    let (tx1, rx1) = util::get_channel(0);
+    let (tx2, rx2) = util::get_channel(0);
+    let (tx3, rx3) = util::get_channel(0);
 
     messenger.subscribe("hello", tx1);
     messenger.subscribe("beautiful", tx3);
@@ -255,9 +255,9 @@ fn messenger_works() {
 fn accumulator_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let (src_tx, src_rx) = unbounded();
+    let (src_tx, src_rx) = util::get_channel(0);
 
-    let (accumulator, accumulate_chan) = Accumulator::new(1000, None, stop_flag.clone(), src_rx, None);
+    let (accumulator, accumulate_chan) = Accumulator::new(1000, None, stop_flag.clone(), src_rx, 0);
 
     src_tx.send("hello").unwrap();
     src_tx.send("there").unwrap();
@@ -299,7 +299,7 @@ fn transformer_01_works() {
                     yield TransformerResult::Completed(Some(value))
                 }
 
-            }), None, stop_flag.clone(), ctx, None);
+            }), None, stop_flag.clone(), ctx, 0);
 
     input.send(0).unwrap();
 

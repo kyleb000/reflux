@@ -8,7 +8,6 @@ mod util;
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
@@ -18,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::{JoinHandle, sleep};
 use std::time::{Duration, Instant};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender};
 
 
 /// An enum returned from a coroutine sent to a `Transformer` object.
@@ -63,7 +62,7 @@ pub enum TransformerResult<O, T, E, L> {
 ///  let (extractor, inlet_chan): (Extractor, Receiver<String>) = Extractor::new(
 ///      add_routine!(#[coroutine] |_: ()| {
 ///          yield "Hello, world".to_string()
-///      }), stop_flag.clone(), None, (), None);
+///      }), stop_flag.clone(), None, (), 0);
 ///
 ///  let data = inlet_chan.recv().unwrap();
 ///  stop_flag.store(true, Ordering::Relaxed);
@@ -91,7 +90,7 @@ impl Extractor {
                             stop_sig: Arc<AtomicBool>,
                             pause_sig: Option<Arc<AtomicBool>>,
                             init_data: I,
-                            data_limit: Option<usize>) -> (Self, Receiver<T>)
+                            data_limit: usize) -> (Self, Receiver<T>)
         where 
             F: Fn() -> C + Send + 'static,
             I: Send + 'static + Clone,
@@ -161,7 +160,7 @@ impl Extractor {
 ///  let (test_tx, test_rx) = unbounded();
 ///  let (loader, out_send)= Loader::new(move |test: String| {
 ///      test_tx.send(test).unwrap();
-///  }, None, stop_flag.clone(), None);
+///  }, None, stop_flag.clone(), 0);
 /// 
 ///  out_send.send("Hello, world".to_string()).unwrap();
 /// 
@@ -191,7 +190,7 @@ impl Loader {
     pub fn new<T, F>(mut loader_fn: F,
                      pause_sig: Option<Arc<AtomicBool>>,
                      stop_sig: Arc<AtomicBool>,
-                     data_limit: Option<usize>) -> (Self, Sender<T>)
+                     data_limit: usize) -> (Self, Sender<T>)
         where
             T: Send + 'static,
             F: FnMut(T) + Send + 'static {
@@ -246,20 +245,20 @@ impl Loader {
 ///  let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
 ///             sleep(Duration::from_secs(1));
 ///             yield "hello".to_string()
-///         }), stop_flag.clone(), None, (), None);
+///         }), stop_flag.clone(), None, (), 0);
 /// 
 ///  let (test_outlet1_sink, test_outlet1_source) = unbounded();
 ///  let (test_outlet2_sink, test_outlet2_source) = unbounded();
 /// 
 ///  let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
 ///     test_outlet1_sink.send(format!("1: {example}")).unwrap()
-///  }, None, stop_flag.clone(), None);
+///  }, None, stop_flag.clone(), 0);
 /// 
 ///  let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
 ///      test_outlet2_sink.send(format!("2: {example}")).unwrap()
-///  }, None, stop_flag.clone(), None);
+///  }, None, stop_flag.clone(), 0);
 /// 
-///  let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone(), None);
+///  let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone(), 0);
 ///  broadcaster.subscribe(test1_tx);
 ///  broadcaster.subscribe(test2_tx);
 /// 
@@ -280,7 +279,7 @@ impl Loader {
 pub struct Broadcast<T> {
     subscribers: Arc<Mutex<Vec<Sender<T>>>>,
     _broadcaster: JoinHandle<()>,
-    data_limit: Option<usize>,
+    data_limit: usize,
 }
 
 impl<T> Broadcast<T> where T: Clone + Send + 'static {
@@ -296,7 +295,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     pub fn new( source: Receiver<T>,
                 pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
-                data_limit: Option<usize>) -> Self {
+                data_limit: usize) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
         
         let thr_subscribers = subscribers.clone();
@@ -470,7 +469,7 @@ pub struct Messenger<ID, S> where ID: Hash + Eq + Send + 'static, S : 'static + 
 impl <ID, S> Messenger<ID, S>  where ID: Eq + Hash + Send + 'static, S: 'static + Send {
     pub fn new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
-                data_limit: Option<usize>) -> (Self, Sender<Message<ID, S>>) {
+                data_limit: usize) -> (Self, Sender<Message<ID, S>>) {
         let (tx, rx)= util::get_channel::<Message<ID, S>>(data_limit);
         let subscribers = Arc::new(Mutex::new(HashMap::<ID, Sender<S>>::new()));
         let thr_subscribers = subscribers.clone();
@@ -531,7 +530,7 @@ impl <ID, S> Messenger<ID, S>  where ID: Eq + Hash + Send + 'static, S: 'static 
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///         
-///  let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone(), None);
+///  let (mut funnel, funnel_out) = Funnel::new(None, stop_flag.clone(), 0);
 ///         
 ///  let (rx1, tx1) = unbounded();
 ///  let (rx2, tx2) = unbounded();
@@ -575,7 +574,7 @@ where D: Send + 'static {
     ///  - A `Receiver` channel for `Funnel` output.
     pub fn new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
-                data_limit: Option<usize>) -> (Self, Receiver<D>) {
+                data_limit: usize) -> (Self, Receiver<D>) {
         let receivers:Arc<Mutex<Vec<Receiver<D>>>> = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = util::get_channel(data_limit);
         
@@ -629,7 +628,7 @@ where D: Send + 'static {
                 pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 source: Receiver<D>,
-                data_limit: Option<usize>) -> (Self, Receiver<Vec<D>>) {
+                data_limit: usize) -> (Self, Receiver<Vec<D>>) {
         let (a_tx, a_rx) = util::get_channel(data_limit);
 
         let accumulator = thread::spawn(move || {
@@ -724,7 +723,7 @@ pub struct TransformerContext<D, G> {
 ///             yield TransformerResult::NeedsMoreWork(data);
 ///         }
 ///     yield TransformerResult::Completed(Some(format!("The number is {data}")));
-///  }), None, stop_flag.clone(), ctx, None);
+///  }), None, stop_flag.clone(), ctx, 0);
 ///
 ///  input.send(0).unwrap();
 ///
@@ -758,7 +757,7 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                           pause_sig: Option<Arc<AtomicBool>>,
                           stop_sig: Arc<AtomicBool>,
                           context: Ctx,
-                          data_limit: Option<usize>) -> (Self, Sender<I>, Receiver<O>, Receiver<E>, Receiver<L>)
+                          data_limit: usize) -> (Self, Sender<I>, Receiver<O>, Receiver<E>, Receiver<L>)
     where
         F: Fn() -> C + Send + 'static,
         C: Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>> + Send + 'static + Unpin,
@@ -926,7 +925,7 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let (tx, rx) = unbounded();
 /// 
-///  let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), None);
+///  let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), 0);
 /// 
 ///  tx.send("hello world".to_string()).unwrap();
 ///  let data = filter_sink.recv().unwrap();
@@ -965,7 +964,7 @@ impl Filter {
                      source: Receiver<T>,
                      pause_sig: Option<Arc<AtomicBool>>,
                      stop_sig: Arc<AtomicBool>,
-                     data_limit: Option<usize>) -> (Self, Receiver<T>)
+                     data_limit: usize) -> (Self, Receiver<T>)
     where
         T: Send + 'static,
         F: Fn(&T) -> bool + Send + 'static {
