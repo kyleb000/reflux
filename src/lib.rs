@@ -27,17 +27,23 @@ use crossbeam_channel::{Receiver, Sender};
 /// - `NeedsMoreWork` - Data has been processed, but is not ready to be sent through the network.
 /// - `Error` - An error occurred when processing data.
 #[derive(Debug, Clone)]
-pub enum TransformerResult<O, T, E, L> {
-    Transformed(T),
-    TransformedMulti(Vec<T>),
-    Completed(Option<T>),
-    CompletedMulti(Option<Vec<T>>),
-    NeedsMoreWork(O),
-    NeedsMoreWorkMulti(Vec<O>),
-    Error(E),
-    ErrorMulti(Vec<E>),
-    Log(L),
-    LogMulti(Vec<L>),
+pub enum TransformerResult<O, T, E>  {
+    Output(Vec<T>),
+    Terminate(Option<Vec<T>>),
+    Consume(Vec<O>),
+    Effect(TransformerEffectType<E>),
+}
+
+#[derive(Debug, Clone)]
+pub enum TransformerEffectType<E> {
+    Emergency(Vec<E>),
+    Alert(Vec<E>),
+    Critical(Vec<E>),
+    Error(Vec<E>),
+    Warning(Vec<E>),
+    Notice(Vec<E>),
+    Info(Vec<E>),
+    Debug(Vec<E>),
 }
 
 /// Receives data from an external source and sends the data through a channel.
@@ -690,58 +696,67 @@ pub struct TransformerContext<D, G> {
 /// ```
 ///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
-///  use reflux::{Transformer, TransformerContext, TransformerResult};
+///  use reflux::{Transformer, TransformerContext, TransformerResult, TransformerEffectType};
 ///  use std::sync::{Arc, Mutex};
 ///  use std::cell::Cell;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::{Receiver, Sender};
-///  use reflux::add_routine;
+///  use reflux::{add_routine, terminate, effect_debug};
 ///  use crossbeam_channel::unbounded;
 ///  use std::time::Duration;
 ///  use std::thread::sleep;
 ///
-///  #[derive(Clone, Default)]
-///  struct InnerContext {
-///     inc_val: i32
-///  }
-///
-///  let ctx = InnerContext {
-///     inc_val: 1
-///  };
-///
-///  let stop_flag = Arc::new(AtomicBool::new(false));
-///
-///  let (transformer, input, output, _, _): (Transformer<i32, String, String, ()>, Sender<i32>, Receiver<String>, Receiver<String>, Receiver<()>) = Transformer::new(
-///     add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<i32, InnerContext>>>>| {
-///         let data_cell = {
-///             input.lock().unwrap().take()
-///         };
-///
-///         let mut data = data_cell.data.unwrap();
-///         while data < 5 {
-///             data += data_cell.globals.inc_val;
-///             yield TransformerResult::NeedsMoreWork(data);
+///  let flag = Arc::new(AtomicBool::new(false));
+///     let array = vec![1, 3, 5, 7, 9];
+/// 
+///     let routine = add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<Vec<i32>, i32>>>>| {
+///         let context = input.lock().unwrap().take();
+/// 
+///         let multiplier = context.globals;
+///         let data = context.data.unwrap().clone();
+/// 
+///         let mut result = Vec::new();
+///         for item in data.into_iter() {
+///             result.push(item * multiplier)
 ///         }
-///     yield TransformerResult::Completed(Some(format!("The number is {data}")));
-///  }), None, stop_flag.clone(), ctx, 0);
-///
-///  input.send(0).unwrap();
-///
-///  let result = output.recv().unwrap();
-///  stop_flag.store(true, Ordering::Relaxed);
-///  transformer.join().unwrap();
-///
-///  assert_eq!(result, "The number is 5".to_string())
+/// 
+///         #[cfg(debug_assertions)]
+///         effect_debug!(vec!["Function completed".to_string()]);
+/// 
+///         terminate!(Some(result));
+///     });
+/// 
+///     let (transformer,
+///         input_sink,
+///         output_source,
+///         effect) = Transformer::new(routine,  None, flag.clone(), 2, 100);
+/// 
+/// 
+///     input_sink.send(array).unwrap();
+///     #[cfg(debug_assertions)]
+///     (|| {
+///         match effect.recv().unwrap() {
+///             TransformerEffectType::Debug(val) => {
+///                 assert_eq!(val, vec!["Function completed".to_string()])
+///             },
+///             _ => {panic!("Invalid variant");}
+///         }
+/// 
+///     })();
+/// 
+///     let result: Vec<i32> = output_source.recv().unwrap();
+///     assert_eq!(result, vec![2, 6, 10, 14, 18]);
+///     flag.store(true, Ordering::Relaxed);
+///     transformer.join().unwrap()
 /// ```
-pub struct Transformer<I, O, E, L> {
+pub struct Transformer<I, O, E> {
     _run_thr: JoinHandle<()>,
     _i: PhantomData<I>,
     _o: PhantomData<O>,
-    _e: PhantomData<E>,
-    _l: PhantomData<L>,
+    _e: PhantomData<TransformerEffectType<E>>,
 }
 
-impl<I, O, E, L> Transformer<I, O, E, L> {
+impl<I, O, E> Transformer<I, O, E> {
     /// Creates a new `Transformer` object.
     ///
     /// # Parameters
@@ -757,21 +772,19 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                           pause_sig: Option<Arc<AtomicBool>>,
                           stop_sig: Arc<AtomicBool>,
                           context: Ctx,
-                          data_limit: usize) -> (Self, Sender<I>, Receiver<O>, Receiver<E>, Receiver<L>)
+                          data_limit: usize) -> (Self, Sender<Vec<I>>, Receiver<Vec<O>>, Receiver<TransformerEffectType<E>>)
     where
         F: Fn() -> C + Send + 'static,
-        C: Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>> + Send + 'static + Unpin,
+        C: Coroutine<Arc<Mutex<Cell<TransformerContext<Vec<I>, Ctx>>>>> + Send + 'static + Unpin,
         Ctx: Send + 'static + Clone,
         I: Send + 'static,
         O: Send + 'static,
         E: Send + 'static,
-        L: Send + 'static,
-        TransformerResult<I, O, E, L>: Send + 'static + From<<C as Coroutine<Arc<Mutex<Cell<TransformerContext<I, Ctx>>>>>>::Yield>,
+        TransformerResult<I, O, E>: Send + 'static + From<<C as Coroutine<Arc<Mutex<Cell<TransformerContext<Vec<I>, Ctx>>>>>>::Yield>,
     {
         let (in_tx, in_rx) = util::get_channel(data_limit);
         let (out_tx, out_rx) = util::get_channel(data_limit);
         let (err_tx, err_rx) = util::get_channel(data_limit);
-        let (log_tx, log_rx) = util::get_channel(data_limit);
 
         let tx2 = in_tx.clone();
         let new_ctx = context;
@@ -797,7 +810,7 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                             }
                         }
                     };
-                    
+
                     if coro_completed {
                         routine = transform_fn();
                         coro_completed = false;
@@ -813,57 +826,38 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                         match Pin::new(&mut routine).resume(loop_context) {
                             CoroutineState::Yielded(res) => {
                                 is_running = true;
-                                let r: TransformerResult<I, O, E, L> = res.into();
+                                let r: TransformerResult<I, O, E> = res.into();
                                 match r {
-                                    TransformerResult::Transformed(val) => {
+                                    TransformerResult::Output(val) => {
                                         out_tx.send(val).unwrap();
                                     }
-                                    TransformerResult::TransformedMulti(val) => {
-                                        for item in val {
-                                            out_tx.send(item).unwrap();
-                                        }
-                                    }
-                                    TransformerResult::Completed(val) => {
+                                    TransformerResult::Terminate(val) => {
                                         is_running = false;
                                         coro_completed = true;
                                         if let Some(data) = val {
                                             out_tx.send(data).unwrap();
                                         }
                                     }
-                                    TransformerResult::CompletedMulti(val) => {
-                                        is_running = false;
-                                        coro_completed = true;
-                                        if let Some(data) = val {
-                                            for item in data {
-                                                out_tx.send(item).unwrap();
-                                            }
-                                        }
-                                    }
-                                    TransformerResult::NeedsMoreWork(val) => {
+                                    TransformerResult::Consume(val) => {
                                         tx2.send(val).unwrap()
                                     }
-                                    TransformerResult::NeedsMoreWorkMulti(val) => {
-                                        for item in val {
-                                            tx2.send(item).unwrap()
+                                    TransformerResult::Effect(effect) => {
+                                        match effect {
+                                            TransformerEffectType::Critical(err) => {
+                                                coro_completed = true;
+                                                is_running = false;
+                                                err_tx.send(TransformerEffectType::Critical(err)).unwrap()
+                                            },
+                                            TransformerEffectType::Emergency(err) => {
+                                                coro_completed = true;
+                                                is_running = false;
+                                                err_tx.send(TransformerEffectType::Emergency(err)).unwrap()
+                                            },
+                                            other => {
+                                                err_tx.send(other).unwrap();
+                                            }
                                         }
-                                    }
-                                    TransformerResult::Error(val) => {
-                                        coro_completed = true;
-                                        err_tx.send(val).unwrap()
-                                    }
-                                    TransformerResult::ErrorMulti(val) => {
-                                        coro_completed = true;
-                                        for item in val {
-                                            err_tx.send(item).unwrap()
-                                        }
-                                    }
-                                    TransformerResult::Log(val) => {
-                                        log_tx.send(val).unwrap()
-                                    }
-                                    TransformerResult::LogMulti(val) => {
-                                        for item in val {
-                                            log_tx.send(item).unwrap()
-                                        }
+
                                     }
                                 }
                                 break
@@ -884,12 +878,10 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
                 _i: Default::default(),
                 _o: Default::default(),
                 _e: Default::default(),
-                _l: Default::default(),
             },
             in_tx,
             out_rx,
             err_rx,
-            log_rx
         )
     }
 
@@ -910,39 +902,40 @@ impl<I, O, E, L> Transformer<I, O, E, L> {
 ///  #![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 ///  #![feature(unboxed_closures)]
 /// use reflux::Filter;
-///  use std::sync::Arc;
-///  use std::sync::atomic::{AtomicBool, Ordering};
-///  use crossbeam_channel::Receiver;
-///  use reflux::add_routine;
-///  use crossbeam_channel::unbounded;
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicBool, Ordering};
+/// use crossbeam_channel::{bounded, Receiver};
+/// use reflux::add_routine;
+/// use crossbeam_channel::unbounded;
 /// use std::time::Duration;
 /// use std::thread::sleep;
 /// let stop_flag = Arc::new(AtomicBool::new(false));
 /// let fun = |data: &String| -> bool {
 ///     data.contains("hello")
-///  };
-/// 
-///  let stop_flag = Arc::new(AtomicBool::new(false));
-///  let (tx, rx) = unbounded();
-/// 
-///  let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), 0);
-/// 
-///  tx.send("hello world".to_string()).unwrap();
-///  let data = filter_sink.recv().unwrap();
-/// 
-///  assert_eq!(data, "hello world");
-/// 
-///  tx.send("goodbye world".to_string()).unwrap();
-///  let res = filter_sink.recv_timeout(Duration::from_secs(1));
-///  assert!(res.is_err());
-/// 
-///  tx.send("hello there".to_string()).unwrap();
-///  let data = filter_sink.recv().unwrap();
-/// 
-///  assert_eq!(data, "hello there");
-///         
-///  stop_flag.store(true, Ordering::Relaxed);
-///  filter.join().unwrap()
+/// };
+///     
+/// let input_data = vec![
+///     "hello world".to_string(),
+///     "goodbye world".to_string(),
+///     "hello there".to_string()
+/// ];
+///  
+/// let expected_data = vec![
+///     "hello world".to_string(),
+///     "hello there".to_string()
+/// ];
+///  
+/// let (tx, rx) = bounded(0);
+///
+/// let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), 0);
+///
+/// tx.send(input_data).unwrap();
+/// let data = filter_sink.recv().unwrap();
+///
+/// assert_eq!(data, expected_data);
+///
+/// stop_flag.store(true, Ordering::Relaxed);
+/// filter.join().unwrap()
 /// ```
 pub struct Filter {
     _filter_thr: JoinHandle<()>,
@@ -961,10 +954,10 @@ impl Filter {
     ///  - A `Filter` object.
     ///  - A `Receiver` channel.
     pub fn new<T, F>(filter_fn: F,
-                     source: Receiver<T>,
+                     source: Receiver<Vec<T>>,
                      pause_sig: Option<Arc<AtomicBool>>,
                      stop_sig: Arc<AtomicBool>,
-                     data_limit: usize) -> (Self, Receiver<T>)
+                     data_limit: usize) -> (Self, Receiver<Vec<T>>)
     where
         T: Send + 'static,
         F: Fn(&T) -> bool + Send + 'static {
@@ -977,10 +970,14 @@ impl Filter {
                         continue
                     }
                 }
+                let mut result = Vec::new();
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
-                    if filter_fn(&data) {
-                        sender.send(data).unwrap()
+                    for item in data {
+                        if filter_fn(&item) {
+                            result.push(item);
+                        }
                     }
+                    sender.send(result).unwrap()
                 }
             }
         });
@@ -1003,5 +1000,87 @@ macro_rules! add_routine {
         move || {
             return $a
         }
+    };
+}
+
+
+#[macro_export]
+macro_rules! terminate {
+    ($a: expr) => {
+        yield TransformerResult::Terminate($a);
+        return;
+    };
+}
+
+#[macro_export]
+macro_rules! output {
+    ($a: expr) => {
+        yield TransformerResult::Output($a);
+        return;
+    };
+}
+
+#[macro_export]
+macro_rules! consume {
+    ($a: expr) => {
+        yield TransformerResult::Consume($a);
+        return;
+    };
+}
+
+#[macro_export]
+macro_rules! effect_emerg {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Emergency($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_alert {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Alert($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_crit {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Critical($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_error {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Error($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_warn {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Warning($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_notice {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Notice($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_info {
+    ($a: expr) => {
+        yield TransformerResult::Effect(TransformerEffectType::Info($a));
+    };
+}
+
+#[macro_export]
+macro_rules! effect_debug {
+    ($a: expr) => {
+        #[cfg(debug_assertions)]
+        yield TransformerResult::Effect(TransformerEffectType::Debug($a));
     };
 }

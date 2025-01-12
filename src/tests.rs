@@ -114,6 +114,17 @@ fn filter_works() {
     let fun = |data: &String| -> bool {
         data.contains("hello")
     };
+    
+    let input_data = vec![
+        "hello world".to_string(),
+        "goodbye world".to_string(),
+        "hello there".to_string()
+    ];
+    
+    let expected_data = vec![
+        "hello world".to_string(),
+        "hello there".to_string()
+    ];
 
     let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -121,19 +132,10 @@ fn filter_works() {
 
     let (filter, filter_sink) = Filter::new(fun, rx, None, stop_flag.clone(), 0);
 
-    tx.send("hello world".to_string()).unwrap();
+    tx.send(input_data).unwrap();
     let data = filter_sink.recv().unwrap();
 
-    assert_eq!(data, "hello world");
-
-    tx.send("goodbye world".to_string()).unwrap();
-    let res = filter_sink.recv_timeout(Duration::from_secs(1));
-    assert!(res.is_err());
-
-    tx.send("hello there".to_string()).unwrap();
-    let data = filter_sink.recv().unwrap();
-
-    assert_eq!(data, "hello there");
+    assert_eq!(data, expected_data);
 
     stop_flag.store(true, Ordering::Relaxed);
     filter.join().unwrap()
@@ -141,43 +143,48 @@ fn filter_works() {
 
 #[test]
 fn transformer_works() {
-    #[derive(Clone, Default)]
-    struct InnerContext {
-        inc_val: i32
-    }
+    let flag = Arc::new(AtomicBool::new(false));
+    let array = vec![1, 3, 5, 7, 9];
 
-    let ctx = InnerContext {
-        inc_val: 1
-    };
+    let routine = add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<Vec<i32>, i32>>>>| {
+        let context = input.lock().unwrap().take();
 
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let (transformer, input, output, _, _): (Transformer<Vec<i32>, i32, String, ()>, Sender<Vec<i32>>, Receiver<i32>, Receiver<String>, Receiver<()>) = Transformer::new(
-        add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<Vec<i32>, InnerContext>>>>| {
+        let multiplier = context.globals;
+        let data = context.data.unwrap().clone();
 
-                let data = {
-                    input.lock().unwrap().take()
-                };
+        let mut result = Vec::new();
+        for item in data.into_iter() {
+            result.push(item * multiplier)
+        }
 
-                let value = data.data.unwrap();
-                let inc = data.globals.inc_val;
-                for x in value {
-                    yield TransformerResult::Transformed(x + inc);
-                }
-                yield TransformerResult::Completed(None)
-            }), None, stop_flag.clone(), ctx, 0);
+        #[cfg(debug_assertions)]
+        effect_debug!(vec!["Function completed".to_string()]);
 
-    input.send(vec![1, 3, 5, 7, 9, 11]).unwrap();
+        terminate!(Some(result));
+    });
 
-    let mut result = 0;
+    let (transformer,
+        input_sink,
+        output_source,
+        effect) = Transformer::new(routine,  None, flag.clone(), 2, 100);
 
-    while let Ok(val) = output.recv_timeout(Duration::from_millis(50)) {
-        result += val;
-    }
 
-    stop_flag.store(true, Ordering::Relaxed);
-    transformer.join().unwrap();
+    input_sink.send(array).unwrap();
+    #[cfg(debug_assertions)]
+    (|| {
+        match effect.recv().unwrap() {
+            TransformerEffectType::Debug(val) => {
+                assert_eq!(val, vec!["Function completed".to_string()])
+            },
+            _ => {panic!("Invalid variant");}
+        }
 
-    assert_eq!(result, 42)
+    })();
+
+    let result: Vec<i32> = output_source.recv().unwrap();
+    assert_eq!(result, vec![2, 6, 10, 14, 18]);
+    flag.store(true, Ordering::Relaxed);
+    transformer.join().unwrap()
 }
 
 #[test]
@@ -272,45 +279,146 @@ fn accumulator_works() {
 }
 
 #[test]
-fn transformer_01_works() {
-    #[derive(Clone, Default)]
-    struct InnerContext {
-        inc_val: i32
-    }
+fn transformer_emerg_effect() {
+    let flag = Arc::new(AtomicBool::new(false));
 
-    let ctx = InnerContext {
-        inc_val: 1
+    let routine = add_routine!(#[coroutine] |_: Arc<Mutex<Cell<TransformerContext<Vec<()>, ()>>>>| {
+
+        effect_emerg!(vec!["Emergency effect".to_string()]);
+
+        effect_debug!(vec!["Invalid effect".to_string()]);
+        terminate!(None::<Vec<()>>);
+    });
+
+    let (transformer,
+        input_sink,
+        _o,
+        effect) = Transformer::new(routine,  None, flag.clone(), (), 100);
+
+
+    input_sink.send(vec![()]).unwrap();
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Emergency(val) => {
+            assert_eq!(val, vec!["Emergency effect".to_string()])
+        },
+        _ => panic!("Invalid variant")
     };
 
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let (transformer, input, output, _, _): (Transformer<i32, i32, String, ()>, Sender<i32>, Receiver<i32>, Receiver<String>, Receiver<()>) = Transformer::new(
-        add_routine!(#[coroutine] |input: Arc<Mutex<Cell<TransformerContext<i32, InnerContext>>>>| {
-
-                let data = {
-                    input.lock().unwrap().take()
-                };
-
-                let value = data.data.unwrap();
-                let inc = data.globals.inc_val;
-
-                if value < 42 {
-                    yield TransformerResult::NeedsMoreWork(value + inc)
-                } else {
-                    yield TransformerResult::Completed(Some(value))
-                }
-
-            }), None, stop_flag.clone(), ctx, 0);
-
-    input.send(0).unwrap();
-
-    let mut result = 0;
-
-    while let Ok(val) = output.recv_timeout(Duration::from_millis(50)) {
-        result += val;
+    match effect.try_recv(){
+        Err(val ) => {
+            assert!(val.is_empty(), "{}", true)
+        },
+        _ => {panic!("Transformer did not abort")}
     }
 
-    stop_flag.store(true, Ordering::Relaxed);
-    transformer.join().unwrap();
+    flag.store(true, Ordering::Relaxed);
+    transformer.join().unwrap()
+}
 
-    assert_eq!(result, 42)
+#[test]
+fn transformer_crit_effect() {
+    let flag = Arc::new(AtomicBool::new(false));
+
+    let routine = add_routine!(#[coroutine] |_: Arc<Mutex<Cell<TransformerContext<Vec<()>, ()>>>>| {
+
+        effect_crit!(vec!["Emergency effect".to_string()]);
+
+        effect_debug!(vec!["Invalid effect".to_string()]);
+        terminate!(None::<Vec<()>>);
+    });
+
+    let (transformer,
+        input_sink,
+        _o,
+        effect) = Transformer::new(routine,  None, flag.clone(), (), 100);
+
+
+    input_sink.send(vec![()]).unwrap();
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Critical(val) => {
+            assert_eq!(val, vec!["Emergency effect".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    match effect.try_recv(){
+        Err(val ) => {
+            assert!(val.is_empty(), "{}", true)
+        },
+        _ => {panic!("Transformer did not abort")}
+    }
+
+    flag.store(true, Ordering::Relaxed);
+    transformer.join().unwrap()
+}
+
+#[test]
+fn transformer_effect() {
+    let flag = Arc::new(AtomicBool::new(false));
+
+    let routine = add_routine!(#[coroutine] |_: Arc<Mutex<Cell<TransformerContext<Vec<()>, ()>>>>| {
+
+        effect_alert!(vec!["This is an alert".to_string()]);
+        effect_error!(vec!["This is an error".to_string()]);
+        effect_info!(vec!["This is an info".to_string()]);
+        effect_warn!(vec!["This is a warning".to_string()]);
+        effect_notice!(vec!["This is a notice".to_string()]);
+        effect_debug!(vec!["This is a debug".to_string()]);
+        terminate!(None::<Vec<()>>);
+    });
+
+    let (transformer,
+        input_sink,
+        _o,
+        effect) = Transformer::new(routine,  None, flag.clone(), (), 100);
+
+
+    input_sink.send(vec![()]).unwrap();
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Alert(val) => {
+            assert_eq!(val, vec!["This is an alert".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Error(val) => {
+            assert_eq!(val, vec!["This is an error".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Info(val) => {
+            assert_eq!(val, vec!["This is an info".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Warning(val) => {
+            assert_eq!(val, vec!["This is a warning".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Notice(val) => {
+            assert_eq!(val, vec!["This is a notice".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    match effect.recv().unwrap() {
+        TransformerEffectType::Debug(val) => {
+            assert_eq!(val, vec!["This is a debug".to_string()])
+        },
+        _ => panic!("Invalid variant")
+    };
+
+    flag.store(true, Ordering::Relaxed);
+    transformer.join().unwrap()
 }
