@@ -1,6 +1,6 @@
 [package]
 name = "reflux"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2021"
 license = "LGPL-3.0-only"
 homepage = "https://github.com/kyleb000/reflux/wiki"
@@ -11,5 +11,4 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-crossbeam-channel = "0.5.13"
-anyhow = "1.0.93"
+crossbeam-channel = "0.5.14"

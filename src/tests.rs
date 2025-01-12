@@ -1,82 +1,67 @@
-use std::thread::sleep;
-use std::time::Duration;
 use super::*;
 
 #[test]
 fn extractor_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let (extractor, inlet_chan): (Extractor, Receiver<String>) = Extractor::new(
-        add_routine!(#[coroutine] |_: ()| {
-                yield "Hello, world".to_string()
-            }), stop_flag.clone(), None, (), 0);
+
+    let extract_fn = |ctx: FnContext<(), String>| {
+        let data_vec = ctx.data.lock().unwrap();
+        data_vec.set(vec![String::from("Hello"), String::from("world")]);
+    };
+
+    let (extractor, inlet_chan): (Extractor, Receiver<Vec<String>>) = Extractor::new(
+        extract_fn, stop_flag.clone(), None, (), 100, 100);
 
     let data = inlet_chan.recv().unwrap();
     stop_flag.store(true, Ordering::Relaxed);
     extractor.join().unwrap();
 
-    assert_eq!(data, "Hello, world".to_string())
+    assert_eq!(data, vec![String::from("Hello"), String::from("world")]);
 }
 
 #[test]
 fn loader_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (test_tx, test_rx) = util::get_channel(0);
-    let (loader, data_tx) = Loader::new(move |test: String| {
-        test_tx.send(test).unwrap();
-    }, None, stop_flag.clone(), 0);
+    let (loader, data_tx) = Loader::new(move |test: FnContext<(), String>| {
+        let data = test.data.lock().unwrap();
+        test_tx.send(data.take()).unwrap();
+    }, (), None, stop_flag.clone(), 50, 50);
 
-    data_tx.send("Hello, world".to_string()).unwrap();
-
+    data_tx.send(vec!["Hello".to_string(), "world".to_string()]).unwrap();
+    
     let data_recv = test_rx.recv().unwrap();
     stop_flag.store(true, Ordering::Relaxed);
     loader.join().unwrap();
 
-    assert_eq!(data_recv, "Hello, world".to_string())
+    assert_eq!(data_recv, vec!["Hello".to_string(), "world".to_string()]);
 }
 
 #[test]
 fn broadcast_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
-            sleep(Duration::from_secs(1));
-            yield "hello".to_string()
-        }), stop_flag.clone(), None, (), 0);
+    let (input_tx, input_rx) = util::get_channel(0);
+    let (output1_tx, output1_rx) = util::get_channel(0);
+    let (output2_tx, output2_rx) = util::get_channel(0);
 
-    let (test_outlet1_sink, test_outlet1_source) = util::get_channel(0);
-    let (test_outlet2_sink, test_outlet2_source) = util::get_channel(0);
 
-    let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
-        test_outlet1_sink.send(format!("1: {example}")).unwrap()
-    }, None, stop_flag.clone(), 0);
+    let mut broadcast = Broadcast::new(
+        input_rx,
+        None,
+        stop_flag.clone(),
+        100
+    );
 
-    let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
-        test_outlet2_sink.send(format!("2: {example}")).unwrap()
-    }, None, stop_flag.clone(), 0);
+    broadcast.subscribe(output1_tx);
+    broadcast.subscribe(output2_tx);
 
-    let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone(), 0);
-    broadcaster.subscribe(test1_tx);
-    broadcaster.subscribe(test2_tx);
+    input_tx.send(vec!["Hello".to_string(), "World".to_string()]).unwrap();
 
-    let chan1 = broadcaster.channel();
-    let chan2 = broadcaster.channel();
-
-    let data1 = test_outlet1_source.recv().unwrap();
-    let data2 = test_outlet2_source.recv().unwrap();
-    let data3 = chan1.recv().unwrap();
-    let data4 = chan2.recv().unwrap();
-
+    assert_eq!(output1_rx.recv().unwrap(), vec!["Hello".to_string(), "World".to_string()]);
+    assert_eq!(output2_rx.recv().unwrap(), vec!["Hello".to_string(), "World".to_string()]);
     stop_flag.store(true, Ordering::Relaxed);
-
-    test_outlet1.join().unwrap();
-    test_outlet2.join().unwrap();
-    test_inlet.0.join().unwrap();
-    broadcaster.join().unwrap();
-
-    assert_eq!(data1, "1: hello".to_string());
-    assert_eq!(data2, "2: hello".to_string());
-    assert_eq!(data3, "hello".to_string());
-    assert_eq!(data4, "hello".to_string());
+    broadcast.join().unwrap();
 }
 
 #[test]

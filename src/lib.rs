@@ -62,19 +62,23 @@ pub enum TransformerEffectType<E> {
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
 ///  use crossbeam_channel::Receiver;
-///  use reflux::add_routine;
+///  use reflux::{add_routine, FnContext};
 ///  use reflux::Extractor;
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
-///  let (extractor, inlet_chan): (Extractor, Receiver<String>) = Extractor::new(
-///      add_routine!(#[coroutine] |_: ()| {
-///          yield "Hello, world".to_string()
-///      }), stop_flag.clone(), None, (), 0);
+///
+///  let extract_fn = |ctx: FnContext<(), String>| {
+///      let data_vec = ctx.data.lock().unwrap();
+///      data_vec.set(vec![String::from("Hello"), String::from("world")]);
+///  };
+///
+///  let (extractor, inlet_chan): (Extractor, Receiver<Vec<String>>) = Extractor::new(
+///  extract_fn, stop_flag.clone(), None, (), 100, 100);
 ///
 ///  let data = inlet_chan.recv().unwrap();
 ///  stop_flag.store(true, Ordering::Relaxed);
 ///  extractor.join().unwrap();
 ///
-///  assert_eq!(data, "Hello, world".to_string())
+///  assert_eq!(data, vec![String::from("Hello"), String::from("world")]);
 /// ```
 pub struct Extractor {
     extract_fn: JoinHandle<()>,
@@ -92,46 +96,46 @@ impl Extractor {
     /// # Returns
     ///  - A `Extractor` object.
     ///  - A`Receiver` channel to receive data from the `extract_fn`.
-    pub fn new<F, C, T, I>( extract_fn: F,
+    pub fn new<F, T, I>( extract_fn: F,
                             stop_sig: Arc<AtomicBool>,
                             pause_sig: Option<Arc<AtomicBool>>,
                             init_data: I,
-                            data_limit: usize) -> (Self, Receiver<T>)
+                            interval_ms: u64,
+                            data_limit: usize) -> (Self, Receiver<Vec<T>>)
         where 
-            F: Fn() -> C + Send + 'static,
+            F: Fn(FnContext<I, T>) -> (),
             I: Send + 'static + Clone,
-            C: Coroutine<I> + Send + 'static + Unpin,
-            T: Send + 'static + From<<C as Coroutine<I>>::Yield> {
-        let (tx, rx) : (Sender<T>, Receiver<T>) = util::get_channel(data_limit);
-        let inlet_thr = thread::spawn(move || {
+            T: Send + 'static + Clone, {
+        let (tx, rx) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
+
+        let extract_ctx = FnContext {
+            init_data,
+            data: Arc::new(Mutex::new(Cell::new(Vec::new()))),
+            stop_sig: stop_sig.clone(),
+            pause_sig: pause_sig.clone()
+        };
+
+        let thr_ctx = extract_ctx.data.clone();
+
+        let extract_thr = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(sig) = pause_sig.as_ref() {
                     if sig.load(Ordering::Relaxed) {
-                        sleep(Duration::from_millis(50));
+                        sleep(Duration::from_millis(interval_ms));
                         continue
                     }
                 }
 
-                let mut routine = extract_fn();
-                loop {
-                    match Pin::new(&mut routine).resume(init_data.clone()) {
-                        CoroutineState::Yielded(res) => {
-                            let r: T = res.into();
-                            let _= match tx.send(r) {
-                                Ok(_) => (),
-                                Err(exception) => {
-                                    // If debug, log it. But for now, no.
-                                    drop(exception)
-                                }
-                            };
-                        }
-                        _ => break
-                    }
-                }
+                let data_guard = thr_ctx.lock().unwrap();
+                let data = data_guard.take();
+                tx.send(data).unwrap();
+                sleep(Duration::from_millis(50));
             }
         });
+
+        extract_fn(extract_ctx.clone());
         let s = Self {
-            extract_fn: inlet_thr,
+            extract_fn: extract_thr,
         };
 
         (s, rx)
@@ -154,30 +158,32 @@ impl Extractor {
 /// 
 /// # Example
 /// ```
-///  use reflux::Loader;
+///  use reflux::{FnContext, Loader};
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
-///  use crossbeam_channel::Receiver;
+///  use crossbeam_channel::{bounded, Receiver};
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
 ///  use std::thread::sleep;
-/// 
+///
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
-///  let (test_tx, test_rx) = unbounded();
-///  let (loader, out_send)= Loader::new(move |test: String| {
-///      test_tx.send(test).unwrap();
-///  }, None, stop_flag.clone(), 0);
-/// 
-///  out_send.send("Hello, world".to_string()).unwrap();
-/// 
+///  let (test_tx, test_rx) = bounded(1);
+///  let (loader, data_tx) = Loader::new(move |test: FnContext<(), String>| {
+///      let data = test.data.lock().unwrap();
+///      test_tx.send(data.take()).unwrap();
+///  }, (), None, stop_flag.clone(), 50, 50);
+///
+///  data_tx.send(vec!["Hello".to_string(), "world".to_string()]).unwrap();
+///
 ///  let data_recv = test_rx.recv().unwrap();
 ///  stop_flag.store(true, Ordering::Relaxed);
 ///  loader.join().unwrap();
-/// 
-///  assert_eq!(data_recv, "Hello, world".to_string())
+///
+///  assert_eq!(data_recv, vec!["Hello".to_string(), "world".to_string()]);
 /// ```
 pub struct Loader {
-    loader_fn: JoinHandle<()>
+    loader_fn: JoinHandle<()>,
+    worker_fn: JoinHandle<()>
 }
 
 impl Loader {
@@ -193,36 +199,69 @@ impl Loader {
     /// # Returns
     /// - A `Loader` object.
     /// - A `Sender` channel to send data out to.
-    pub fn new<T, F>(mut loader_fn: F,
-                     pause_sig: Option<Arc<AtomicBool>>,
-                     stop_sig: Arc<AtomicBool>,
-                     data_limit: usize) -> (Self, Sender<T>)
+    pub fn new<T, I, F>(mut loader_fn: F,
+                        init_data: I,
+                        pause_sig: Option<Arc<AtomicBool>>,
+                        stop_sig: Arc<AtomicBool>,
+                        interval_ms: u64,
+                        data_limit: usize) -> (Self, Sender<Vec<T>>)
         where
-            T: Send + 'static,
-            F: FnMut(T) + Send + 'static {
+            T: Send + 'static + Clone,
+            I: Send + 'static + Clone,
+            F: FnMut(FnContext<I, T>) + Send + 'static {
 
-        let (sender, receiver) : (Sender<T>, Receiver<T>) = util::get_channel(data_limit);
-        let loader = thread::spawn(move || {
-            while !stop_sig.load(Ordering::Relaxed) {
-                if let Some(sig) = pause_sig.as_ref() {
+        let (sender, receiver) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
+
+        let ctx = FnContext {
+            init_data,
+            data: Arc::new(Mutex::new(Cell::new(Vec::new()))),
+            stop_sig: stop_sig.clone(),
+            pause_sig: pause_sig.clone()
+        };
+
+        let thr_ctx = ctx.data.clone();
+
+        let thr_stop_sig = stop_sig.clone();
+        let thr_pause_sig = pause_sig.clone();
+
+        let loader_thr = thread::spawn(move || {
+            while !thr_stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = thr_pause_sig.as_ref() {
                     if sig.load(Ordering::Relaxed) {
                         sleep(Duration::from_millis(50));
                         continue
                     }
                 }
                 if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
-                    loader_fn(data)
+                    thr_ctx.lock().unwrap().set(data);
                 }
             }
         });
+
+        let worker_thr = thread::spawn(move || {
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(sig) = pause_sig.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(interval_ms));
+                        continue
+                    }
+                }
+                loader_fn(ctx.clone());
+            }
+        });
+
+
+
         (Self {
-            loader_fn: loader
+            loader_fn: loader_thr,
+            worker_fn: worker_thr,
         }, sender)
     }
     
     /// Waits for the `Loader` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
         self.loader_fn.join()?;
+        self.worker_fn.join()?;
         Ok(())
     }
 }
@@ -241,49 +280,39 @@ impl Loader {
 ///  use reflux::{Extractor, Loader, Broadcast};
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
-///  use crossbeam_channel::Receiver;
+///  use crossbeam_channel::{bounded, Receiver};
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
 ///  use std::time::Duration;
 ///  use std::thread::sleep;
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
-/// 
-///  let test_inlet: (Extractor, Receiver<String>) = Extractor::new(add_routine!(#[coroutine] || {
-///             sleep(Duration::from_secs(1));
-///             yield "hello".to_string()
-///         }), stop_flag.clone(), None, (), 0);
-/// 
-///  let (test_outlet1_sink, test_outlet1_source) = unbounded();
-///  let (test_outlet2_sink, test_outlet2_source) = unbounded();
-/// 
-///  let (test_outlet1, test1_tx) = Loader::new(move |example: String| {
-///     test_outlet1_sink.send(format!("1: {example}")).unwrap()
-///  }, None, stop_flag.clone(), 0);
-/// 
-///  let (test_outlet2, test2_tx) = Loader::new(move |example: String| {
-///      test_outlet2_sink.send(format!("2: {example}")).unwrap()
-///  }, None, stop_flag.clone(), 0);
-/// 
-///  let mut broadcaster = Broadcast::new(test_inlet.1, None, stop_flag.clone(), 0);
-///  broadcaster.subscribe(test1_tx);
-///  broadcaster.subscribe(test2_tx);
-/// 
-///  let data1 = test_outlet1_source.recv().unwrap();
-///  let data2 = test_outlet2_source.recv().unwrap();
-/// 
-///  stop_flag.store(true, Ordering::Relaxed);
-/// 
-///  test_outlet1.join().unwrap();
-///  test_outlet2.join().unwrap();
-///  test_inlet.0.join().unwrap();
-///  broadcaster.join().unwrap();
-/// 
-/// 
-///  assert_eq!(data1, "1: hello".to_string());
-///  assert_eq!(data2, "2: hello".to_string());
+///
+/// let stop_flag = Arc::new(AtomicBool::new(false));
+///
+/// let (input_tx, input_rx) = bounded(0);
+/// let (output1_tx, output1_rx) = bounded(0);
+/// let (output2_tx, output2_rx) = bounded(0);
+///
+///
+/// let mut broadcast = Broadcast::new(
+///     input_rx,
+///     None,
+///     stop_flag.clone(),
+///     100
+/// );
+///
+/// broadcast.subscribe(output1_tx);
+/// broadcast.subscribe(output2_tx);
+///
+/// input_tx.send(vec!["Hello".to_string(), "World".to_string()]).unwrap();
+///
+///assert_eq!(output1_rx.recv().unwrap(), vec!["Hello".to_string(), "World".to_string()]);
+///assert_eq!(output2_rx.recv().unwrap(), vec!["Hello".to_string(), "World".to_string()]);
+/// stop_flag.store(true, Ordering::Relaxed);
+/// broadcast.join().unwrap();
 /// ```
 pub struct Broadcast<T> {
-    subscribers: Arc<Mutex<Vec<Sender<T>>>>,
+    subscribers: Arc<Mutex<Vec<Sender<Vec<T>>>>>,
     _broadcaster: JoinHandle<()>,
     data_limit: usize,
 }
@@ -298,11 +327,11 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     ///
     /// # Returns
     /// A `Broadcast` object.
-    pub fn new( source: Receiver<T>,
+    pub fn new( source: Receiver<Vec<T>>,
                 pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> Self {
-        let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
+        let subscribers = Arc::new(Mutex::new(Vec::<Sender<Vec<T>>>::new()));
         
         let thr_subscribers = subscribers.clone();
         let broadcaster = thread::spawn(move || {
@@ -332,7 +361,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     ///
     /// # Parameters
     ///  - `subscriber` - A `Sender` with which to send data.
-    pub fn subscribe(&mut self, subscriber: Sender<T>) {
+    pub fn subscribe(&mut self, subscriber: Sender<Vec<T>>) {
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(subscriber)
     }
@@ -341,7 +370,7 @@ impl<T> Broadcast<T> where T: Clone + Send + 'static {
     /// 
     /// # Returns
     /// - A `Receiver` channel from which to receive data.
-    pub fn channel(&mut self) -> Receiver<T> {
+    pub fn channel(&mut self) -> Receiver<Vec<T>> {
         let (tx, rx) = util::get_channel(self.data_limit);
         let mut subscribers_lock = self.subscribers.lock().unwrap();
         subscribers_lock.push(tx);
@@ -681,6 +710,14 @@ where D: Send + 'static {
 pub struct TransformerContext<D, G> {
     pub globals: G,
     pub data: Option<D>
+}
+
+#[derive(Clone, Default)]
+pub struct FnContext<I, D> {
+    pub init_data: I,
+    pub data: Arc<Mutex<Cell<Vec<D>>>>,
+    pub stop_sig: Arc<AtomicBool>,
+    pub pause_sig: Option<Arc<AtomicBool>>,
 }
 
 
