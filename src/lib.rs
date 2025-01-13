@@ -1053,7 +1053,6 @@ macro_rules! terminate {
 macro_rules! output {
     ($a: expr) => {
         yield TransformerResult::Output($a);
-        return;
     };
 }
 
@@ -1061,7 +1060,6 @@ macro_rules! output {
 macro_rules! consume {
     ($a: expr) => {
         yield TransformerResult::Consume($a);
-        return;
     };
 }
 
