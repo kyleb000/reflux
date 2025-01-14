@@ -1067,6 +1067,7 @@ macro_rules! consume {
 macro_rules! effect_emerg {
     ($a: expr) => {
         yield TransformerResult::Effect(TransformerEffectType::Emergency($a));
+        return;
     };
 }
 
@@ -1081,6 +1082,7 @@ macro_rules! effect_alert {
 macro_rules! effect_crit {
     ($a: expr) => {
         yield TransformerResult::Effect(TransformerEffectType::Critical($a));
+        return;
     };
 }
 
