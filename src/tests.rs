@@ -24,8 +24,11 @@ fn loader_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (test_tx, test_rx) = util::get_channel(0);
     let (loader, data_tx) = Loader::new(move |test: FnContext<(), String>| {
-        let data = test.data.lock().unwrap();
-        test_tx.send(data.take()).unwrap();
+        let mut data = test.data.lock().unwrap();
+        if data.get_mut().len() > 0 {
+            test_tx.send(data.take()).unwrap();
+        }
+        
     }, (), None, stop_flag.clone(), 50, 50);
 
     data_tx.send(vec!["Hello".to_string(), "world".to_string()]).unwrap();

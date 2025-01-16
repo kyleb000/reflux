@@ -8,6 +8,7 @@ mod util;
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
@@ -82,6 +83,7 @@ pub enum TransformerEffectType<E> {
 /// ```
 pub struct Extractor {
     extract_fn: JoinHandle<()>,
+    fn_thr: JoinHandle<()>,
 }
 
 impl Extractor {
@@ -103,7 +105,7 @@ impl Extractor {
                             interval_ms: u64,
                             data_limit: usize) -> (Self, Receiver<Vec<T>>)
         where 
-            F: Fn(FnContext<I, T>) -> (),
+            F: Fn(FnContext<I, T>) -> () + Send + Sync + 'static,
             I: Send + 'static + Clone,
             T: Send + 'static + Clone, {
         let (tx, rx) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
@@ -116,8 +118,30 @@ impl Extractor {
         };
 
         let thr_ctx = extract_ctx.data.clone();
+        let extract_pause = pause_sig.clone();
+        let extract_stop = stop_sig.clone();
 
         let extract_thr = thread::spawn(move || {
+            while !extract_stop.load(Ordering::Relaxed) {
+                if let Some(sig) = extract_pause.as_ref() {
+                    if sig.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(interval_ms));
+                        continue
+                    }
+                }
+
+                if let Ok (guard) = thr_ctx.try_lock() {
+                    let data = guard.take();
+                    if data.len() > 0 {
+                        tx.send(data).unwrap();
+                    }
+                }
+
+                sleep(Duration::from_millis(50));
+            }
+        });
+
+        let fn_thr = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(sig) = pause_sig.as_ref() {
                     if sig.load(Ordering::Relaxed) {
@@ -125,17 +149,12 @@ impl Extractor {
                         continue
                     }
                 }
-
-                let data_guard = thr_ctx.lock().unwrap();
-                let data = data_guard.take();
-                tx.send(data).unwrap();
-                sleep(Duration::from_millis(50));
+                extract_fn(extract_ctx.clone());
             }
         });
-
-        extract_fn(extract_ctx.clone());
         let s = Self {
             extract_fn: extract_thr,
+            fn_thr,
         };
 
         (s, rx)
@@ -143,7 +162,9 @@ impl Extractor {
 
     /// Waits for the `Extractor` object to finish execution.
     pub fn join(self) -> thread::Result<()> {
-        self.extract_fn.join()
+        self.extract_fn.join()?;
+        self.fn_thr.join()?;
+        Ok(())
     }
 }
 
@@ -169,8 +190,10 @@ impl Extractor {
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let (test_tx, test_rx) = bounded(1);
 ///  let (loader, data_tx) = Loader::new(move |test: FnContext<(), String>| {
-///      let data = test.data.lock().unwrap();
-///      test_tx.send(data.take()).unwrap();
+///      let mut data = test.data.lock().unwrap();
+///      if data.get_mut().len() > 0 {
+///          test_tx.send(data.take()).unwrap();
+///      }
 ///  }, (), None, stop_flag.clone(), 50, 50);
 ///
 ///  data_tx.send(vec!["Hello".to_string(), "world".to_string()]).unwrap();
@@ -233,7 +256,9 @@ impl Loader {
                     }
                 }
                 if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
-                    thr_ctx.lock().unwrap().set(data);
+                    if data.len() > 0 {
+                        thr_ctx.lock().unwrap().set(data);
+                    }
                 }
             }
         });
