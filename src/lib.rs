@@ -637,12 +637,13 @@ where D: Send + 'static {
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> (Self, Receiver<D>) {
         let (recv_sink, recv_source) = util::get_channel::<Receiver<D>>(data_limit);
-        
+
         let thr_sink = recv_sink.clone();
-        
+
         let (tx, rx) = util::get_channel(data_limit);
         
         let funnel_worker = thread::spawn(move || {
+            let mut delay_recv = false;
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(sig) = pause_sig.as_ref() {
                     if sig.load(Ordering::Relaxed) {
@@ -651,9 +652,16 @@ where D: Send + 'static {
                     }
                 }
                 
+                if delay_recv {
+                    sleep(Duration::from_millis(100));
+                }
+
                 if let Ok(receiver) = recv_source.recv_timeout(Duration::from_millis(10)) {
                     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
+                        delay_recv = false;
                         tx.send(data).unwrap()
+                    } else {
+                        delay_recv = true;
                     }
                     thr_sink.send(receiver).unwrap();
                 }
