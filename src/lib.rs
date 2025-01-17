@@ -13,7 +13,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::{JoinHandle, sleep};
@@ -618,7 +618,7 @@ impl <ID, S> Messenger<ID, S>  where ID: Eq + Hash + Send + 'static, S: 'static 
 /// ```
 pub struct Funnel<D> {
     _funnel_fn: JoinHandle<()>,
-    receivers: Arc<Mutex<Vec<Receiver<D>>>>
+    receivers: Arc<RwLock<Vec<Receiver<D>>>>
 }
 
 impl<D> Funnel<D> 
@@ -635,7 +635,7 @@ where D: Send + 'static {
     pub fn new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> (Self, Receiver<D>) {
-        let receivers:Arc<Mutex<Vec<Receiver<D>>>> = Arc::new(Mutex::new(Vec::new()));
+        let receivers:Arc<RwLock<Vec<Receiver<D>>>> = Arc::new(RwLock::new(Vec::new()));
         let (tx, rx) = util::get_channel(data_limit);
         
         let worker_receivers = receivers.clone();
@@ -647,7 +647,7 @@ where D: Send + 'static {
                         continue
                     }
                 }
-                for receiver in worker_receivers.lock().unwrap().iter() {
+                for receiver in worker_receivers.read().unwrap().iter() {
                     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
                         tx.send(data).unwrap()
                     }
@@ -667,7 +667,7 @@ where D: Send + 'static {
     /// # Parameters
     ///  - `source` - A `Receiver` channel from which data are received
     pub fn add_source(&mut self, source: Receiver<D>) {
-        self.receivers.lock().unwrap().push(source)
+        self.receivers.write().unwrap().push(source)
     }
 
     /// Waits for the `Funnel` object to finish execution
