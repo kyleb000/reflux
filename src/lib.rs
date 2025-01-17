@@ -8,12 +8,12 @@ mod util;
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Coroutine, CoroutineState};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::{JoinHandle, sleep};
@@ -640,11 +640,8 @@ where D: Send + 'static {
         
         let thr_sink = recv_sink.clone();
         
-        
-        let receivers:Arc<RwLock<Vec<Receiver<D>>>> = Arc::new(RwLock::new(Vec::new()));
         let (tx, rx) = util::get_channel(data_limit);
         
-        //let worker_receivers = receivers.clone();
         let funnel_worker = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(sig) = pause_sig.as_ref() {
@@ -660,12 +657,6 @@ where D: Send + 'static {
                     }
                     thr_sink.send(receiver).unwrap();
                 }
-                
-                // for receiver in worker_receivers.read().unwrap().iter() {
-                //     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
-                //         tx.send(data).unwrap()
-                //     }
-                // }
             }
         });
         (
