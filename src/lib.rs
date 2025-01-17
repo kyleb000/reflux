@@ -618,7 +618,8 @@ impl <ID, S> Messenger<ID, S>  where ID: Eq + Hash + Send + 'static, S: 'static 
 /// ```
 pub struct Funnel<D> {
     _funnel_fn: JoinHandle<()>,
-    receivers: Arc<RwLock<Vec<Receiver<D>>>>
+    source_sink: Sender<Receiver<D>>,
+    //receivers: Arc<RwLock<Vec<Receiver<D>>>>
 }
 
 impl<D> Funnel<D> 
@@ -635,10 +636,15 @@ where D: Send + 'static {
     pub fn new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> (Self, Receiver<D>) {
+        let (recv_sink, recv_source) = util::get_channel::<Receiver<D>>(data_limit);
+        
+        let thr_sink = recv_sink.clone();
+        
+        
         let receivers:Arc<RwLock<Vec<Receiver<D>>>> = Arc::new(RwLock::new(Vec::new()));
         let (tx, rx) = util::get_channel(data_limit);
         
-        let worker_receivers = receivers.clone();
+        //let worker_receivers = receivers.clone();
         let funnel_worker = thread::spawn(move || {
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(sig) = pause_sig.as_ref() {
@@ -647,17 +653,25 @@ where D: Send + 'static {
                         continue
                     }
                 }
-                for receiver in worker_receivers.read().unwrap().iter() {
+                
+                if let Ok(receiver) = recv_source.recv_timeout(Duration::from_millis(10)) {
                     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
                         tx.send(data).unwrap()
                     }
+                    thr_sink.send(receiver).unwrap();
                 }
+                
+                // for receiver in worker_receivers.read().unwrap().iter() {
+                //     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
+                //         tx.send(data).unwrap()
+                //     }
+                // }
             }
         });
         (
             Self {
                 _funnel_fn: funnel_worker,
-                receivers
+                source_sink: recv_sink
             }, rx
         )
     }
@@ -667,7 +681,7 @@ where D: Send + 'static {
     /// # Parameters
     ///  - `source` - A `Receiver` channel from which data are received
     pub fn add_source(&mut self, source: Receiver<D>) {
-        self.receivers.write().unwrap().push(source)
+        self.source_sink.send(source).unwrap();
     }
 
     /// Waits for the `Funnel` object to finish execution
