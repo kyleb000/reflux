@@ -137,7 +137,7 @@ impl Extractor {
                     }
                 }
 
-                sleep(Duration::from_millis(50));
+                sleep(Duration::from_millis(interval_ms));
             }
         });
 
