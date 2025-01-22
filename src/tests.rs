@@ -32,7 +32,7 @@ fn loader_works() {
         while !the_flag.load(Ordering::Relaxed) {
             sleep(Duration::from_millis(100));
         }
-        
+
     }, (), None, stop_flag.clone(), 50, 50);
 
     data_tx.send(vec!["Hello".to_string(), "world".to_string()]).unwrap();
@@ -258,9 +258,9 @@ fn accumulator_works() {
 
     let (accumulator, accumulate_chan) = Accumulator::new(1000, None, stop_flag.clone(), src_rx, 0);
 
-    src_tx.send("hello").unwrap();
-    src_tx.send("there").unwrap();
-    src_tx.send("world").unwrap();
+    src_tx.send(vec!["hello"]).unwrap();
+    src_tx.send(vec!["there"]).unwrap();
+    src_tx.send(vec!["world"]).unwrap();
 
     let result = accumulate_chan.recv().unwrap();
 

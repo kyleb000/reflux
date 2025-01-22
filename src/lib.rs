@@ -242,8 +242,6 @@ impl Loader {
             pause_sig: pause_sig.clone()
         };
 
-        let thr_ctx = ctx.data.clone();
-
         let thr_stop_sig = stop_sig.clone();
         let thr_pause_sig = pause_sig.clone();
 
@@ -700,7 +698,7 @@ where D: Send + 'static {
     pub fn new( max_wait: u64,
                 pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
-                source: Receiver<D>,
+                source: Receiver<Vec<D>>,
                 data_limit: usize) -> (Self, Receiver<Vec<D>>) {
         let (a_tx, a_rx) = util::get_channel(data_limit);
 
@@ -720,7 +718,7 @@ where D: Send + 'static {
 
                 while Instant::now() < future {
                     if let Ok(data) = source.recv_timeout(Duration::from_millis(50)) {
-                        accumulate_data.get_mut().push(data);
+                        accumulate_data.get_mut().extend(data);
                     }
                 }
 
