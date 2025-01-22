@@ -4,9 +4,9 @@ use super::*;
 fn extractor_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let extract_fn = |ctx: FnContext<(), String>| {
-        let data_vec = ctx.data.lock().unwrap();
-        data_vec.set(vec![String::from("Hello"), String::from("world")]);
+    let extract_fn = |ctx: FnContext<(), Sender<Vec<String>>>| {
+        let sender = ctx.data;
+        sender.send(vec![String::from("Hello"), String::from("world")]).unwrap();
     };
 
     let (extractor, inlet_chan): (Extractor, Receiver<Vec<String>>) = Extractor::new(
@@ -23,10 +23,14 @@ fn extractor_works() {
 fn loader_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (test_tx, test_rx) = util::get_channel(0);
-    let (loader, data_tx) = Loader::new(move |test: FnContext<(), String>| {
-        let mut data = test.data.lock().unwrap();
-        if data.get_mut().len() > 0 {
-            test_tx.send(data.take()).unwrap();
+    let (loader, data_tx) = Loader::new(move |test: FnContext<(), Receiver<Vec<String>>>| {
+        let data = test.data.recv().unwrap();
+        let the_flag = test.stop_sig;
+        if data.len() > 0 {
+            test_tx.send(data).unwrap();
+        }
+        while !the_flag.load(Ordering::Relaxed) {
+            sleep(Duration::from_millis(100));
         }
         
     }, (), None, stop_flag.clone(), 50, 50);

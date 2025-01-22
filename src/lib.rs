@@ -62,14 +62,13 @@ pub enum TransformerEffectType<E> {
 ///  #![feature(unboxed_closures)]
 ///  use std::sync::Arc;
 ///  use std::sync::atomic::{AtomicBool, Ordering};
-///  use crossbeam_channel::Receiver;
+///  use crossbeam_channel::{Receiver, Sender};
 ///  use reflux::{add_routine, FnContext};
 ///  use reflux::Extractor;
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///
-///  let extract_fn = |ctx: FnContext<(), String>| {
-///      let data_vec = ctx.data.lock().unwrap();
-///      data_vec.set(vec![String::from("Hello"), String::from("world")]);
+///  let extract_fn = |ctx: FnContext<(), Sender<Vec<String>>>| {
+///      ctx.data.send(vec![String::from("Hello"), String::from("world")]).unwrap();
 ///  };
 ///
 ///  let (extractor, inlet_chan): (Extractor, Receiver<Vec<String>>) = Extractor::new(
@@ -105,19 +104,19 @@ impl Extractor {
                             interval_ms: u64,
                             data_limit: usize) -> (Self, Receiver<Vec<T>>)
         where 
-            F: Fn(FnContext<I, T>) -> () + Send + Sync + 'static,
+            F: Fn(FnContext<I, Sender<Vec<T>>>) -> () + Send + Sync + 'static,
             I: Send + 'static + Clone,
             T: Send + 'static + Clone, {
         let (tx, rx) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
+        let (extract_tx, extract_rx) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
 
-        let extract_ctx = FnContext {
+        let extract_ctx :FnContext<I, Sender<Vec<T>>> = FnContext {
             init_data,
-            data: Arc::new(Mutex::new(Cell::new(Vec::new()))),
+            data: extract_tx,
             stop_sig: stop_sig.clone(),
             pause_sig: pause_sig.clone()
         };
 
-        let thr_ctx = extract_ctx.data.clone();
         let extract_pause = pause_sig.clone();
         let extract_stop = stop_sig.clone();
 
@@ -129,15 +128,10 @@ impl Extractor {
                         continue
                     }
                 }
-
-                if let Ok (guard) = thr_ctx.try_lock() {
-                    let data = guard.take();
-                    if data.len() > 0 {
-                        tx.send(data).unwrap();
-                    }
+                
+                if let Ok(data) = extract_rx.recv() {
+                    tx.send(data).unwrap();
                 }
-
-                sleep(Duration::from_millis(interval_ms));
             }
         });
 
@@ -186,13 +180,18 @@ impl Extractor {
 ///  use reflux::add_routine;
 ///  use crossbeam_channel::unbounded;
 ///  use std::thread::sleep;
+/// use std::time::Duration;
 ///
 ///  let stop_flag = Arc::new(AtomicBool::new(false));
 ///  let (test_tx, test_rx) = bounded(1);
-///  let (loader, data_tx) = Loader::new(move |test: FnContext<(), String>| {
-///      let mut data = test.data.lock().unwrap();
-///      if data.get_mut().len() > 0 {
-///          test_tx.send(data.take()).unwrap();
+///  let (loader, data_tx) = Loader::new(move |test: FnContext<(), Receiver<Vec<String>>>| {
+///      let data = test.data.recv().unwrap();
+///      let the_flag = test.stop_sig;
+///      if data.len() > 0 {
+///          test_tx.send(data).unwrap();
+///      }
+///      while ! the_flag.load(Ordering::Relaxed) {
+///          sleep(Duration::from_millis(100))
 ///      }
 ///  }, (), None, stop_flag.clone(), 50, 50);
 ///
@@ -231,13 +230,14 @@ impl Loader {
         where
             T: Send + 'static + Clone,
             I: Send + 'static + Clone,
-            F: FnMut(FnContext<I, T>) + Send + 'static {
+            F: FnMut(FnContext<I, Receiver<Vec<T>>>) + Send + 'static {
 
         let (sender, receiver) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
+        let (load_sender, load_receiver) : (Sender<Vec<T>>, Receiver<Vec<T>>) = util::get_channel(data_limit);
 
         let ctx = FnContext {
             init_data,
-            data: Arc::new(Mutex::new(Cell::new(Vec::new()))),
+            data: load_receiver,
             stop_sig: stop_sig.clone(),
             pause_sig: pause_sig.clone()
         };
@@ -257,7 +257,7 @@ impl Loader {
                 }
                 if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
                     if data.len() > 0 {
-                        thr_ctx.lock().unwrap().set(data);
+                        load_sender.send(data).unwrap();
                     }
                 }
             }
@@ -750,10 +750,10 @@ pub struct TransformerContext<D, G> {
     pub data: Option<D>
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FnContext<I, D> {
     pub init_data: I,
-    pub data: Arc<Mutex<Cell<Vec<D>>>>,
+    pub data: D,
     pub stop_sig: Arc<AtomicBool>,
     pub pause_sig: Option<Arc<AtomicBool>>,
 }
