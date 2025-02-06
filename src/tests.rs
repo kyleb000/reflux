@@ -271,6 +271,45 @@ fn accumulator_works() {
 }
 
 #[test]
+fn accumulator_frame_works() {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let (src_tx, src_rx) = util::get_channel(0);
+
+    let (accumulator, accumulate_chan) = Accumulator::new(1000, None, stop_flag.clone(), src_rx, 5);
+
+    src_tx.send(vec!["hello"]).unwrap();
+    src_tx.send(vec!["there"]).unwrap();
+    src_tx.send(vec!["world"]).unwrap();
+    src_tx.send(vec!["foo"]).unwrap();
+    src_tx.send(vec!["bar"]).unwrap();
+    src_tx.send(vec!["baz"]).unwrap();
+
+    let result = accumulate_chan.recv().unwrap().len();
+    assert_eq!(result, 5);
+    
+    let result = accumulate_chan.recv().unwrap().len();
+    assert_eq!(result, 1);
+
+    src_tx.send(vec!["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]).unwrap();
+
+    let result = accumulate_chan.recv().unwrap().len();
+    assert_eq!(result, 5);
+
+    let result = accumulate_chan.recv().unwrap().len();
+    assert_eq!(result, 5);
+
+    let result = accumulate_chan.recv().unwrap().len();
+    assert_eq!(result, 5);
+
+    let result = accumulate_chan.recv().unwrap().len();
+    assert_eq!(result, 1);
+
+    stop_flag.store(true, Ordering::Relaxed);
+    accumulator.join().unwrap()
+}
+
+#[test]
 fn transformer_emerg_effect() {
     let flag = Arc::new(AtomicBool::new(false));
 

@@ -701,9 +701,17 @@ where D: Send + 'static {
                 source: Receiver<Vec<D>>,
                 data_limit: usize) -> (Self, Receiver<Vec<D>>) {
         let (a_tx, a_rx) = util::get_channel(data_limit);
+        
+        let vec_gen = move || -> Vec<D> {
+            if data_limit == 0 {
+                Vec::new()
+            } else {
+                Vec::with_capacity(data_limit)
+            }
+        };
 
         let accumulator = thread::spawn(move || {
-            let mut accumulate_data = Cell::new(Vec::new());
+            let mut accumulate_data = Cell::new(vec_gen());
 
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(ref pause) = pause_sig {
@@ -713,17 +721,26 @@ where D: Send + 'static {
                     }
                 }
 
-                let now = Instant::now();
-                let future = now + Duration::from_millis(max_wait);
+                let mut future = Instant::now() + Duration::from_millis(max_wait);
 
                 while Instant::now() < future {
-                    if let Ok(data) = source.recv_timeout(Duration::from_millis(50)) {
-                        accumulate_data.get_mut().extend(data);
+                    if let Ok(mut data) = source.recv_timeout(Duration::from_millis(50)) {
+                        if data_limit > 0 {
+                            while data.len() > 0 {
+                                if accumulate_data.get_mut().len() >= data_limit {
+                                    a_tx.send(accumulate_data.replace(vec_gen())).unwrap();
+                                    future = Instant::now() + Duration::from_millis(max_wait);
+                                }
+                                accumulate_data.get_mut().push(data.remove(0));
+                            }
+                        } else {
+                            accumulate_data.get_mut().extend(data);
+                        }
                     }
                 }
 
                 if !accumulate_data.get_mut().is_empty() {
-                    a_tx.send(accumulate_data.take()).unwrap();
+                    a_tx.send(accumulate_data.replace(vec_gen())).unwrap();
                 }
             }
         });
