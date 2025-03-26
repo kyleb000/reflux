@@ -243,6 +243,39 @@ fn funnel_works() {
 }
 
 #[test]
+fn funnel_drop_works() {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let (mut funnel, funnel_out) = Funnel::new_drop(None, stop_flag.clone(), 2);
+
+    let (rx1, tx1) = util::get_channel(0);
+    let (rx2, tx2) = util::get_channel(0);
+    let (rx3, tx3) = util::get_channel(0);
+
+    funnel.add_source(tx1);
+    funnel.add_source(tx2);
+    funnel.add_source(tx3);
+
+    rx1.send("hello".to_string()).unwrap();
+    rx2.send("beautiful".to_string()).unwrap();
+    rx3.send("world".to_string()).unwrap();
+
+    sleep(Duration::from_millis(1000));
+
+    let test1 = funnel_out.recv_timeout(Duration::from_millis(500));
+    let test2 = funnel_out.recv_timeout(Duration::from_millis(500));
+    let test3 = funnel_out.recv_timeout(Duration::from_millis(500));
+
+    assert!(test1.is_ok());
+    assert!(test2.is_ok());
+    assert!(test3.is_err());
+
+    stop_flag.store(true, Ordering::Relaxed);
+
+    funnel.join().unwrap()
+}
+
+#[test]
 fn messenger_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (mut messenger, messenger_sender) = Messenger::new(None, stop_flag.clone(), 0);

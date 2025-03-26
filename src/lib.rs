@@ -651,7 +651,8 @@ pub struct Funnel<D> {
 
 impl<D> Funnel<D> 
 where D: Send + 'static {
-    /// Creates a new `Funnel` object
+    /// Creates a new `Funnel` object. If outlet channel is full, inlets are blocked until channel
+    /// is not blocked.
     /// 
     /// # Parameters
     /// - `pause_sig` - A flag to signal the `Funnel` object to pause execution.
@@ -663,12 +664,34 @@ where D: Send + 'static {
     pub fn new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> (Self, Receiver<D>) {
-        let (recv_sink, recv_source) = util::get_channel::<Receiver<D>>(data_limit);
+        Self::_real_new(pause_sig, stop_sig, data_limit, false)
+    }
+
+    /// Creates a new `Funnel` object. If the outlet channel is full, inlet channels drop data.
+    ///
+    /// # Parameters
+    /// - `pause_sig` - A flag to signal the `Funnel` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Funnel` object to terminate execution.
+    ///
+    /// # Returns
+    ///  - A `Funnel` object.
+    ///  - A `Receiver` channel for `Funnel` output.
+    pub fn new_drop( pause_sig: Option<Arc<AtomicBool>>,
+                stop_sig: Arc<AtomicBool>,
+                data_limit: usize) -> (Self, Receiver<D>) {
+        Self::_real_new(pause_sig, stop_sig, data_limit, true)
+    }
+
+    fn _real_new( pause_sig: Option<Arc<AtomicBool>>,
+                stop_sig: Arc<AtomicBool>,
+                data_limit: usize,
+                check_full: bool) -> (Self, Receiver<D>) {
+        let (recv_sink, recv_source) = util::get_channel::<Receiver<D>>(0);
 
         let thr_sink = recv_sink.clone();
 
         let (tx, rx) = util::get_channel(data_limit);
-        
+
         let funnel_worker = thread::spawn(move || {
             let mut delay_recv = false;
             while !stop_sig.load(Ordering::Relaxed) {
@@ -678,7 +701,7 @@ where D: Send + 'static {
                         continue
                     }
                 }
-                
+
                 if delay_recv {
                     sleep(Duration::from_millis(100));
                 }
@@ -686,7 +709,13 @@ where D: Send + 'static {
                 if let Ok(receiver) = recv_source.recv_timeout(Duration::from_millis(10)) {
                     if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
                         delay_recv = false;
-                        tx.send(data).unwrap()
+                        if check_full {
+                            if ! tx.is_full() {
+                                tx.send(data).unwrap();
+                            }
+                        } else {
+                            tx.send(data).unwrap()
+                        }
                     } else {
                         delay_recv = true;
                     }
