@@ -460,7 +460,8 @@ pub struct Router <T>  {
 
 
 impl <T> Router<T> where T: Send + 'static {
-    /// Creates a new `Router` object.
+    /// Creates a new `Router` object. If a subscriber is full, it blocks until the message can be
+    /// sent.
     ///
     /// # Parameters
     /// - `source` - The source of data that needs to be routed.
@@ -472,6 +473,27 @@ impl <T> Router<T> where T: Send + 'static {
     pub fn new(source: Receiver<T>,
                pause_sig: Option<Arc<AtomicBool>>,
                stop_sig: Arc<AtomicBool>) -> Self {
+        Self::_real_new(source, pause_sig, stop_sig, false)
+    }
+
+    /// Creates a new `Router` object. If a subscriber is full, drop the message.
+    ///
+    /// # Parameters
+    /// - `source` - The source of data that needs to be routed.
+    /// - `pause_sig` - A flag to signal the `Router` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Router` object to terminate execution.
+    ///
+    /// # Returns
+    /// A `Router` object.
+    pub fn new_drop(source: Receiver<T>,
+               pause_sig: Option<Arc<AtomicBool>>,
+               stop_sig: Arc<AtomicBool>) -> Self {
+        Self::_real_new(source, pause_sig, stop_sig, true)
+    }
+
+    fn _real_new(source: Receiver<T>,
+                 pause_sig: Option<Arc<AtomicBool>>,
+                 stop_sig: Arc<AtomicBool>, check_full: bool) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
 
         let thr_subscribers = subscribers.clone();
@@ -486,7 +508,14 @@ impl <T> Router<T> where T: Send + 'static {
                 }
                 if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
                     let subscribers_lock = thr_subscribers.lock().unwrap();
-                    subscribers_lock.get(pointer).unwrap().send(data).unwrap();
+                    if check_full {
+                        let lock = subscribers_lock.get(pointer).unwrap();
+                        if ! lock.is_full() {
+                            lock.send(data).unwrap();
+                        }
+                    } else {
+                        subscribers_lock.get(pointer).unwrap().send(data).unwrap();
+                    }
                     pointer = (pointer + 1) % subscribers_lock.len();
                 }
             }

@@ -102,6 +102,38 @@ fn router_works() {
 }
 
 #[test]
+fn router_drop_works() {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let (tx, rx) = util::get_channel(0);
+
+    let mut router= Router::new_drop(rx, None, stop_flag.clone());
+
+    let (in1, out1) = util::get_channel(1);
+    let (in2, out2) = util::get_channel(1);
+
+    router.subscribe(in1);
+    router.subscribe(in2);
+
+    tx.send("hello".to_string()).unwrap();
+    tx.send("there".to_string()).unwrap();
+    tx.send("beautiful".to_string()).unwrap();
+    tx.send("world".to_string()).unwrap();
+
+    sleep(Duration::from_millis(1000));
+
+    let out1_res = out1.try_recv();
+    let out2_res = out2.try_recv();
+    let out3_res = out1.try_recv();
+    let out4_res = out2.try_recv();
+
+    assert!(out1_res.is_ok());
+    assert!(out2_res.is_ok());
+    assert!(out3_res.is_err());
+    assert!(out4_res.is_err());
+}
+
+#[test]
 fn filter_works() {
     let fun = |data: &String| -> bool {
         data.contains("hello")
