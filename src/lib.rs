@@ -473,7 +473,7 @@ impl <T> Router<T> where T: Send + 'static {
     pub fn new(source: Receiver<T>,
                pause_sig: Option<Arc<AtomicBool>>,
                stop_sig: Arc<AtomicBool>) -> Self {
-        Self::_real_new(source, pause_sig, stop_sig, false)
+        Self::_real_new(source, pause_sig, stop_sig, false, None)
     }
 
     /// Creates a new `Router` object. If a subscriber is full, drop the message.
@@ -488,12 +488,29 @@ impl <T> Router<T> where T: Send + 'static {
     pub fn new_drop(source: Receiver<T>,
                pause_sig: Option<Arc<AtomicBool>>,
                stop_sig: Arc<AtomicBool>) -> Self {
-        Self::_real_new(source, pause_sig, stop_sig, true)
+        Self::_real_new(source, pause_sig, stop_sig, true, None)
+    }
+
+    /// Creates a new `Router` object. If a subscriber is full, drop the message.
+    ///
+    /// # Parameters
+    /// - `source` - The source of data that needs to be routed.
+    /// - `pause_sig` - A flag to signal the `Router` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Router` object to terminate execution.
+    ///
+    /// # Returns
+    /// A `Router` object.
+    pub fn new_drop_overflow(source: Receiver<T>,
+                    pause_sig: Option<Arc<AtomicBool>>,
+                    stop_sig: Arc<AtomicBool>,
+                    overflow: Sender<T>) -> Self {
+        Self::_real_new(source, pause_sig, stop_sig, true, Some(overflow))
     }
 
     fn _real_new(source: Receiver<T>,
                  pause_sig: Option<Arc<AtomicBool>>,
-                 stop_sig: Arc<AtomicBool>, check_full: bool) -> Self {
+                 stop_sig: Arc<AtomicBool>, check_full: bool,
+                overflow: Option<Sender<T>>) -> Self {
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<T>>::new()));
 
         let thr_subscribers = subscribers.clone();
@@ -512,6 +529,10 @@ impl <T> Router<T> where T: Send + 'static {
                         let lock = subscribers_lock.get(pointer).unwrap();
                         if ! lock.is_full() {
                             lock.send(data).unwrap();
+                        } else {
+                            if let Some(ref chan) = overflow {
+                                chan.send(data).unwrap();
+                            }
                         }
                     } else {
                         subscribers_lock.get(pointer).unwrap().send(data).unwrap();
@@ -664,7 +685,7 @@ where D: Send + 'static {
     pub fn new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> (Self, Receiver<D>) {
-        Self::_real_new(pause_sig, stop_sig, data_limit, false)
+        Self::_real_new(pause_sig, stop_sig, data_limit, false, None)
     }
 
     /// Creates a new `Funnel` object. If the outlet channel is full, inlet channels drop data.
@@ -679,13 +700,32 @@ where D: Send + 'static {
     pub fn new_drop( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize) -> (Self, Receiver<D>) {
-        Self::_real_new(pause_sig, stop_sig, data_limit, true)
+        Self::_real_new(pause_sig, stop_sig, data_limit, true, None)
+    }
+
+    /// Creates a new `Funnel` object. If the outlet channel is full, inlet sends data to
+    /// overflow channel.
+    ///
+    /// # Parameters
+    /// - `pause_sig` - A flag to signal the `Funnel` object to pause execution.
+    /// - `stop_sig` - A flag to signal the `Funnel` object to terminate execution.
+    /// - `overflow_chan` - A channel for catching data that would otherwise be dropped.
+    ///
+    /// # Returns
+    ///  - A `Funnel` object.
+    ///  - A `Receiver` channel for `Funnel` output.
+    pub fn new_drop_overflow( pause_sig: Option<Arc<AtomicBool>>,
+                     stop_sig: Arc<AtomicBool>,
+                     data_limit: usize,
+                              overflow: Sender<D>) -> (Self, Receiver<D>) {
+        Self::_real_new(pause_sig, stop_sig, data_limit, true, Some(overflow))
     }
 
     fn _real_new( pause_sig: Option<Arc<AtomicBool>>,
                 stop_sig: Arc<AtomicBool>,
                 data_limit: usize,
-                check_full: bool) -> (Self, Receiver<D>) {
+                check_full: bool,
+                  overflow: Option<Sender<D>>) -> (Self, Receiver<D>) {
         let (recv_sink, recv_source) = util::get_channel::<Receiver<D>>(0);
 
         let thr_sink = recv_sink.clone();
@@ -712,6 +752,10 @@ where D: Send + 'static {
                         if check_full {
                             if ! tx.is_full() {
                                 tx.send(data).unwrap();
+                            } else {
+                                if let Some(ref chan)=  overflow {
+                                    chan.send(data).unwrap();
+                                }
                             }
                         } else {
                             tx.send(data).unwrap()

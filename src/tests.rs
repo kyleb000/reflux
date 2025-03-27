@@ -134,6 +134,45 @@ fn router_drop_works() {
 }
 
 #[test]
+fn router_overflow_works() {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let (tx, rx) = util::get_channel(0);
+    let (overflow_tx, overflow_rx) = util::get_channel(0);
+
+    let mut router= Router::new_drop_overflow(rx, None, stop_flag.clone(), overflow_tx);
+
+    let (in1, out1) = util::get_channel(1);
+    let (in2, out2) = util::get_channel(1);
+
+    router.subscribe(in1);
+    router.subscribe(in2);
+
+    tx.send("hello".to_string()).unwrap();
+    tx.send("there".to_string()).unwrap();
+    tx.send("beautiful".to_string()).unwrap();
+    tx.send("world".to_string()).unwrap();
+
+    sleep(Duration::from_millis(1000));
+
+    let out1_res = out1.try_recv();
+    let out2_res = out2.try_recv();
+    let out3_res = out1.try_recv();
+    let out4_res = out2.try_recv();
+
+    let overflow_res1 = overflow_rx.recv();
+    let overflow_res2 = overflow_rx.recv();
+
+    assert!(out1_res.is_ok());
+    assert!(out2_res.is_ok());
+    assert!(out3_res.is_err());
+    assert!(out4_res.is_err());
+
+    assert!(overflow_res1.is_ok());
+    assert!(overflow_res2.is_ok());
+}
+
+#[test]
 fn filter_works() {
     let fun = |data: &String| -> bool {
         data.contains("hello")
@@ -269,6 +308,43 @@ fn funnel_drop_works() {
     assert!(test1.is_ok());
     assert!(test2.is_ok());
     assert!(test3.is_err());
+
+    stop_flag.store(true, Ordering::Relaxed);
+
+    funnel.join().unwrap()
+}
+
+#[test]
+fn funnel_overflow_works() {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let (overflow_tx, overflow_rx) = util::get_channel(0);
+    let (mut funnel, funnel_out) = Funnel::new_drop_overflow(None, stop_flag.clone(), 2, overflow_tx);
+
+    let (rx1, tx1) = util::get_channel(0);
+    let (rx2, tx2) = util::get_channel(0);
+    let (rx3, tx3) = util::get_channel(0);
+
+    funnel.add_source(tx1);
+    funnel.add_source(tx2);
+    funnel.add_source(tx3);
+
+    rx1.send("hello".to_string()).unwrap();
+    rx2.send("beautiful".to_string()).unwrap();
+    rx3.send("world".to_string()).unwrap();
+
+    sleep(Duration::from_millis(1000));
+
+    let test1 = funnel_out.recv_timeout(Duration::from_millis(500));
+    let test2 = funnel_out.recv_timeout(Duration::from_millis(500));
+    let test3 = funnel_out.recv_timeout(Duration::from_millis(500));
+
+    let test4 = overflow_rx.recv();
+
+    assert!(test1.is_ok());
+    assert!(test2.is_ok());
+    assert!(test3.is_err());
+    assert!(test4.is_ok());
 
     stop_flag.store(true, Ordering::Relaxed);
 
