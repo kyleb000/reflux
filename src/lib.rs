@@ -855,6 +855,62 @@ where D: Send + 'static {
         )
     }
 
+    pub fn new_scalar( max_wait: u64,
+                pause_sig: Option<Arc<AtomicBool>>,
+                stop_sig: Arc<AtomicBool>,
+                source: Receiver<D>,
+                data_limit: usize) -> (Self, Receiver<Vec<D>>) {
+        let (a_tx, a_rx) = util::get_channel(data_limit);
+
+        let vec_gen = move || -> Vec<D> {
+            if data_limit == 0 {
+                Vec::new()
+            } else {
+                Vec::with_capacity(data_limit)
+            }
+        };
+
+        let accumulator = thread::spawn(move || {
+            let mut accumulate_data = Cell::new(vec_gen());
+
+            while !stop_sig.load(Ordering::Relaxed) {
+                if let Some(ref pause) = pause_sig {
+                    if pause.load(Ordering::Relaxed) {
+                        sleep(Duration::from_millis(50));
+                        continue
+                    }
+                }
+
+                let mut future = Instant::now() + Duration::from_millis(max_wait);
+
+                while Instant::now() < future {
+                    if let Ok(data) = source.recv_timeout(Duration::from_millis(50)) {
+                        if data_limit > 0 {
+                            if accumulate_data.get_mut().len() >= data_limit {
+                                a_tx.send(accumulate_data.replace(vec_gen())).unwrap();
+                                future = Instant::now() + Duration::from_millis(max_wait);
+                            }
+                            accumulate_data.get_mut().push(data);
+                        } else {
+                            accumulate_data.get_mut().push(data);
+                        }
+                    }
+                }
+
+                if !accumulate_data.get_mut().is_empty() {
+                    a_tx.send(accumulate_data.replace(vec_gen())).unwrap();
+                }
+            }
+        });
+        (
+            Self {
+                _funnel_fn: accumulator,
+                __phantom_data: Default::default(),
+            },
+            a_rx
+        )
+    }
+
     pub fn join(self) -> thread::Result<()> {
         self._funnel_fn.join()
     }

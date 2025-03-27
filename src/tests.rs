@@ -412,6 +412,26 @@ fn accumulator_works() {
 }
 
 #[test]
+fn accumulator_scalar_works() {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let (src_tx, src_rx) = util::get_channel(0);
+
+    let (accumulator, accumulate_chan) = Accumulator::new_scalar(1000, None, stop_flag.clone(), src_rx, 0);
+
+    src_tx.send("hello").unwrap();
+    src_tx.send("there").unwrap();
+    src_tx.send("world").unwrap();
+
+    let result = accumulate_chan.recv().unwrap();
+
+    assert_eq!(result, vec!["hello", "there", "world"]);
+
+    stop_flag.store(true, Ordering::Relaxed);
+    accumulator.join().unwrap()
+}
+
+#[test]
 fn accumulator_frame_works() {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
