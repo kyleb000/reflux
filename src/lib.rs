@@ -523,10 +523,26 @@ impl <T> Router<T> where T: Send + 'static {
                         continue
                     }
                 }
-                if let Ok(data) = source.recv_timeout(Duration::from_millis(10)) {
-                    let subscribers_lock = thr_subscribers.lock().unwrap();
+                
+                let chan_sz = if source.len() < 100 {
+                    source.len()
+                } else {
+                    100
+                };
+                
+                let mut chan_data = Vec::with_capacity(chan_sz);
+                
+                for _ in 0..chan_sz {
+                    if let Ok(data) = source.recv() {
+                        chan_data.push(data);
+                    }
+                }
+
+                let subscribers_lock = thr_subscribers.lock().unwrap();
+                
+                for data in chan_data {
+                    let lock = subscribers_lock.get(pointer).unwrap();
                     if check_full {
-                        let lock = subscribers_lock.get(pointer).unwrap();
                         if ! lock.is_full() {
                             lock.send(data).unwrap();
                         } else {
@@ -733,7 +749,6 @@ where D: Send + 'static {
         let (tx, rx) = util::get_channel(data_limit);
 
         let funnel_worker = thread::spawn(move || {
-            let mut delay_recv = false;
             while !stop_sig.load(Ordering::Relaxed) {
                 if let Some(sig) = pause_sig.as_ref() {
                     if sig.load(Ordering::Relaxed) {
@@ -742,13 +757,22 @@ where D: Send + 'static {
                     }
                 }
 
-                if delay_recv {
-                    sleep(Duration::from_millis(100));
-                }
-
-                if let Ok(receiver) = recv_source.recv_timeout(Duration::from_millis(10)) {
-                    if let Ok(data) = receiver.recv_timeout(Duration::from_millis(10)) {
-                        delay_recv = false;
+                if let Ok(receiver) = recv_source.recv() {
+                    let chan_sz = if receiver.len() < 100 {
+                        receiver.len()
+                    } else {
+                        100
+                    };
+                    
+                    let mut chan_data = Vec::with_capacity(chan_sz);
+                    
+                    for _ in 0..chan_sz {
+                        if let Ok(data) = receiver.recv() {
+                            chan_data.push(data);
+                        }
+                    }
+                    
+                    for data in chan_data {
                         if check_full {
                             if ! tx.is_full() {
                                 tx.send(data).unwrap();
@@ -760,8 +784,6 @@ where D: Send + 'static {
                         } else {
                             tx.send(data).unwrap()
                         }
-                    } else {
-                        delay_recv = true;
                     }
                     thr_sink.send(receiver).unwrap();
                 }
