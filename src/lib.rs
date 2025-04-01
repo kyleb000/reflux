@@ -541,19 +541,20 @@ impl <T> Router<T> where T: Send + 'static {
                 let subscribers_lock = thr_subscribers.lock().unwrap();
                 
                 for data in chan_data {
-                    let lock = subscribers_lock.get(pointer).unwrap();
-                    if check_full {
-                        if ! lock.is_full() {
-                            lock.send(data).unwrap();
-                        } else {
-                            if let Some(ref chan) = overflow {
-                                chan.send(data).unwrap();
+                    if let Some(lock) = subscribers_lock.get(pointer) {
+                        if check_full {
+                            if ! lock.is_full() {
+                                lock.send(data).unwrap();
+                            } else {
+                                if let Some(ref chan) = overflow {
+                                    chan.send(data).unwrap();
+                                }
                             }
+                        } else {
+                            subscribers_lock.get(pointer).unwrap().send(data).unwrap();
                         }
-                    } else {
-                        subscribers_lock.get(pointer).unwrap().send(data).unwrap();
+                        pointer = (pointer + 1) % subscribers_lock.len();
                     }
-                    pointer = (pointer + 1) % subscribers_lock.len();
                 }
             }
         });
